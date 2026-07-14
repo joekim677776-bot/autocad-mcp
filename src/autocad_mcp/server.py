@@ -474,6 +474,9 @@ async def system(
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
       execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
+                      DISABLED by default. Runs arbitrary code on the host (can
+                      reach shell/process/registry via AutoLISP). Enable only with
+                      env AUTOCAD_MCP_ALLOW_EXECUTE_LISP=true.
     """
     data = data or {}
 
@@ -510,6 +513,15 @@ async def system(
         result = await backend.status()
         return _json(result.to_dict())
     elif operation == "execute_lisp":
+        from autocad_mcp.config import ALLOW_EXECUTE_LISP
+
+        if not ALLOW_EXECUTE_LISP:
+            return _json({
+                "error": "execute_lisp is disabled.",
+                "hint": "Freehand AutoLISP execution runs arbitrary code on the host "
+                        "and is off by default. Set AUTOCAD_MCP_ALLOW_EXECUTE_LISP=true "
+                        "to enable it.",
+            })
         backend = await get_backend()
         if not data.get("code"):
             return _json({"error": "data.code is required"})

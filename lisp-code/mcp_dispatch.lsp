@@ -1,10 +1,14 @@
 ;;; mcp_dispatch.lsp — File-based IPC dispatcher for AutoCAD MCP v3.1
 ;;;
 ;;; Protocol:
-;;;   1. Python writes command JSON to C:/temp/autocad_mcp_cmd_{id}.json
+;;;   1. Python writes command JSON to <ipc-dir>/autocad_mcp_cmd_{id}.json
 ;;;   2. Python types "(c:mcp-dispatch)" + Enter
 ;;;   3. This function reads cmd, dispatches via command map, writes result JSON
-;;;   4. Python polls for C:/temp/autocad_mcp_result_{id}.json
+;;;   4. Python polls for <ipc-dir>/autocad_mcp_result_{id}.json
+;;;
+;;; NOTE: *mcp-ipc-dir* below MUST match Python's AUTOCAD_MCP_IPC_DIR / the
+;;; config.py default (project-local .ipc folder). If you set a custom
+;;; AUTOCAD_MCP_IPC_DIR, update the path here too.
 ;;;
 ;;; SECURITY: No raw eval — dispatcher uses a command whitelist/map.
 ;;; Compatible with AutoCAD LT 2024+.
@@ -14,8 +18,9 @@
   (defun report-error (msg) (princ (strcat "\nERROR: " msg)))
 )
 
-;; IPC directory
-(setq *mcp-ipc-dir* "C:/temp/")
+;; IPC directory — must match Python config.py IPC_DIR (project-local .ipc).
+;; Trailing slash is required (paths are built via strcat).
+(setq *mcp-ipc-dir* "C:/Projects/cadagent/autocad-mcp/.ipc/")
 
 ;; -----------------------------------------------------------------------
 ;; JSON-like output helpers (minimal, no external library)

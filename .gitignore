@@ -42,6 +42,9 @@ ENV/
 Thumbs.db
 *.tmp
 
+# MCP file-IPC scratch directory (command/result/lisp temp files)
+.ipc/
+
 # AutoCAD temporary files
 *.bak
 *.sv$

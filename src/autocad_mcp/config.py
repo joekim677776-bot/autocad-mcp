@@ -11,8 +11,13 @@ import structlog
 log = structlog.get_logger()
 
 # Paths
-LISP_DIR = Path(__file__).resolve().parent.parent.parent / "lisp-code"
-IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR", "C:/temp"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+LISP_DIR = PROJECT_ROOT / "lisp-code"
+# Default IPC dir is a private, project-local folder (not the shared C:/temp,
+# which is world-readable by other local users). Override via AUTOCAD_MCP_IPC_DIR.
+# NOTE: the AutoLISP dispatcher hardcodes the same path in mcp_dispatch.lsp
+# (*mcp-ipc-dir*); both sides must agree or file IPC breaks.
+IPC_DIR = Path(os.environ.get("AUTOCAD_MCP_IPC_DIR", str(PROJECT_ROOT / ".ipc")))
 
 # Backend selection
 BACKEND_DEFAULT = "auto"  # auto | file_ipc | ezdxf
@@ -22,6 +27,12 @@ IPC_TIMEOUT = max(1.0, min(300.0, float(os.environ.get("AUTOCAD_MCP_IPC_TIMEOUT"
 
 # Screenshot
 ONLY_TEXT_FEEDBACK = os.environ.get("AUTOCAD_MCP_ONLY_TEXT", "").lower() in ("1", "true", "yes")
+
+# Freehand AutoLISP execution (system operation="execute_lisp").
+# Disabled by default: it loads and runs arbitrary AutoLISP on the host,
+# which can reach shell/process execution via (startapp), COM, the registry, etc.
+# Opt in explicitly with AUTOCAD_MCP_ALLOW_EXECUTE_LISP=true (or 1/yes).
+ALLOW_EXECUTE_LISP = os.environ.get("AUTOCAD_MCP_ALLOW_EXECUTE_LISP", "").lower() in ("1", "true", "yes")
 
 # Win32 availability
 WIN32_AVAILABLE = sys.platform == "win32"

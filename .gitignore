@@ -59,6 +59,9 @@ Thumbs.db
 
 # User-specific configuration
 claude_desktop_config.json
+# .mcp.json holds a machine-specific absolute path to the venv python; keep it
+# local so it doesn't break on clones checked out to a different path.
+.mcp.json
 
 # Local test files
 test_*.dwg

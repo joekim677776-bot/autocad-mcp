@@ -28,6 +28,46 @@ log = structlog.get_logger()
 # IPC settings
 POLL_INTERVAL = 0.1  # seconds
 TIMEOUT = IPC_TIMEOUT  # seconds (configurable via AUTOCAD_MCP_IPC_TIMEOUT)
+
+
+def _fmt_coord(v) -> str:
+    """Format a coordinate for the ``x,y;x,y`` string protocol.
+
+    The LISP dispatcher parses these point strings with AutoLISP ``atof``,
+    which cannot read two float forms that rotation/trig geometry produces:
+      * scientific notation for near-zero values, e.g. ``-2.449e-13`` (atof
+        stops at the ``e`` and returns a garbage mantissa)
+      * 16-17 significant-digit FP noise, e.g. ``749.9999999999999``
+    Both corrupt the parsed vertex (collapsed / self-intersecting shapes).
+    Fixed-decimal formatting avoids both; 6 decimals is nanometre precision
+    on a millimetre drawing, well inside any drafting tolerance. The ezdxf
+    backend is unaffected because it hands floats straight to ezdxf with no
+    string round-trip.
+    """
+    return f"{float(v):.6f}"
+
+
+def _round_coord(v) -> float:
+    """Round a numeric coordinate for the JSON command protocol.
+
+    Numeric-coordinate commands (create_line/create_arc/...) send bare JSON
+    numbers that the LISP side reads with ``mcp-json-get-number``: it scans a
+    token from the set ``0-9 . - +`` and calls ``atof``. Scientific notation
+    breaks that scan (``6.12e-17`` -> atof stops at ``e``), and 16-17 digit FP
+    noise is undesirable. Unlike the ``;``-delimited string protocol we must
+    keep a JSON *number* here (a quoted string would scan as 0), so we round
+    to the same 6 decimals as :func:`_fmt_coord`. Rounding alone is not enough
+    because a residual such as ``1e-06`` reprs back as scientific notation; any
+    sub-``1e-4`` value is a trig residual that is geometrically zero at mm
+    scale, so we snap it to ``0.0`` to guarantee ``json.dumps`` emits a plain
+    decimal token.
+    """
+    r = round(float(v), 6)
+    if r != 0.0 and abs(r) < 1e-4:
+        return 0.0
+    return r
+
+
 STALE_THRESHOLD = 60.0  # clean up files older than this
 
 
@@ -311,13 +351,16 @@ class FileIPCBackend(AutoCADBackend):
     # --- Entity operations ---
 
     async def create_line(self, x1, y1, x2, y2, layer=None) -> CommandResult:
-        return await self._dispatch("create-line", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "layer": layer})
+        return await self._dispatch("create-line", {
+            "x1": _round_coord(x1), "y1": _round_coord(y1),
+            "x2": _round_coord(x2), "y2": _round_coord(y2), "layer": layer,
+        })
 
     async def create_circle(self, cx, cy, radius, layer=None) -> CommandResult:
         return await self._dispatch("create-circle", {"cx": cx, "cy": cy, "radius": radius, "layer": layer})
 
     async def create_polyline(self, points, closed=False, layer=None) -> CommandResult:
-        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        pts_str = ";".join(f"{_fmt_coord(p[0])},{_fmt_coord(p[1])}" for p in points)
         return await self._dispatch("create-polyline", {
             "points_str": pts_str, "closed": "1" if closed else "0", "layer": layer
         })
@@ -326,7 +369,11 @@ class FileIPCBackend(AutoCADBackend):
         return await self._dispatch("create-rectangle", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "layer": layer})
 
     async def create_arc(self, cx, cy, radius, start_angle, end_angle, layer=None) -> CommandResult:
-        return await self._dispatch("create-arc", {"cx": cx, "cy": cy, "radius": radius, "start_angle": start_angle, "end_angle": end_angle, "layer": layer})
+        return await self._dispatch("create-arc", {
+            "cx": _round_coord(cx), "cy": _round_coord(cy), "radius": _round_coord(radius),
+            "start_angle": _round_coord(start_angle), "end_angle": _round_coord(end_angle),
+            "layer": layer,
+        })
 
     async def create_ellipse(self, cx, cy, major_x, major_y, ratio, layer=None) -> CommandResult:
         return await self._dispatch("create-ellipse", {"cx": cx, "cy": cy, "major_x": major_x, "major_y": major_y, "ratio": ratio, "layer": layer})
@@ -440,7 +487,7 @@ class FileIPCBackend(AutoCADBackend):
         return await self._dispatch("create-dimension-radius", {"cx": cx, "cy": cy, "radius": radius, "angle": angle})
 
     async def create_leader(self, points, text) -> CommandResult:
-        pts_str = ";".join(f"{p[0]},{p[1]}" for p in points)
+        pts_str = ";".join(f"{_fmt_coord(p[0])},{_fmt_coord(p[1])}" for p in points)
         return await self._dispatch("create-leader", {"points_str": pts_str, "text": text})
 
     # --- P&ID ---

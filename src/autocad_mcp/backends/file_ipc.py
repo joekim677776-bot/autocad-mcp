@@ -528,6 +528,31 @@ class FileIPCBackend(AutoCADBackend):
     async def pid_insert_tank(self, x, y, tank_type, scale=1.0, attributes=None) -> CommandResult:
         return await self._dispatch("pid-insert-tank", {"x": x, "y": y, "tank_type": tank_type, "scale": scale, "attributes": attributes or {}})
 
+    # --- Polisnab standards (Phase 1) ---
+
+    async def polisnab_setup_layers(self, layers_str) -> CommandResult:
+        return await self._dispatch("polisnab-setup-layers", {"layers_str": layers_str})
+
+    async def polisnab_setup_dimstyle(self, name, dimscale, dimtxt, dimasz, dimexe, dimexo) -> CommandResult:
+        return await self._dispatch("polisnab-setup-dimstyle", {
+            "name": name, "dimscale": dimscale, "dimtxt": dimtxt,
+            "dimasz": dimasz, "dimexe": dimexe, "dimexo": dimexo,
+        })
+
+    async def polisnab_insert_title_block(
+        self, *, doc_number, product_name, scale, sheet_num=1, sheet_total=1,
+        developed_by="", checked_by="", approved_by="", litera=None,
+        company_name="", block_scale=30.0,
+    ) -> CommandResult:
+        # None values (e.g. litera) are stripped by _dispatch before the LISP sees them.
+        return await self._dispatch("polisnab-insert-title-block", {
+            "doc_number": doc_number, "product_name": product_name, "scale": scale,
+            "sheet_num": sheet_num, "sheet_total": sheet_total,
+            "developed_by": developed_by, "checked_by": checked_by,
+            "approved_by": approved_by, "litera": litera,
+            "company_name": company_name, "block_scale": block_scale,
+        })
+
     # --- View ---
 
     async def zoom_extents(self) -> CommandResult:

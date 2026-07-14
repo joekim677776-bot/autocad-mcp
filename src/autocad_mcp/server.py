@@ -532,6 +532,125 @@ async def system(
 
 
 # ==========================================================================
+# 9. polisnab — Polisnab drafting standards (layers + dimension style)
+# ==========================================================================
+
+
+@mcp.tool(annotations={"title": "Polisnab Drafting Standards", "readOnlyHint": False})
+@_safe("polisnab")
+async def polisnab(
+    operation: str,
+    data: dict | None = None,
+    include_screenshot: bool = False,
+) -> ToolResult:
+    """Polisnab module-drawing standards (Phases 1-2).
+
+    Applies the fixed drafting standard from PROJECT-BRIEF-autocad-mcp-polisnab.md
+    to the ACTIVE drawing. Run setup_layers + setup_dimstyle once on any new
+    drawing before detailing.
+
+    Operations:
+      setup_layers    — Create the full Polisnab layer standard (11 layers:
+                        AR-WALL, AR-WALL-INSUL, AR-DOOR, AR-WIND, AR-VENT,
+                        AR-VESTIBULE, DIM, TEXT, AXIS, TITLE-BLOCK, HATCH-FLOOR)
+                        with the ACI colors and linetypes from section 4.
+      setup_dimstyle  — Create/redefine the POLISNAB-DIM dimension style
+                        (DIMSCALE=40, mm units, integer precision, text above
+                        the line, closed-filled arrows; section 5) and make it
+                        the current dimension style so subsequent dimensions use it.
+      insert_title_block — Insert the GOST 2.104 form 1 main-inscription block
+                        (185x55 mm frame with editable attributes) at the
+                        bottom-right of the drawing extents and fill it.
+                        Pass fields via `data`:
+                          doc_number, product_name, scale (e.g. "1:50"),
+                          sheet_num, sheet_total, developed_by, checked_by,
+                          approved_by, litera (optional), company_name (optional,
+                          defaults to "ООО «ПОЛИСНАБ»"), block_scale (optional
+                          geometric size multiplier, default 30).
+
+    Parametric node generators (section 7) — geometry only, via `data`.
+    Openings position against a module box (defaults 6000x2400 at origin;
+    override with module_origin=[x,y], module_length, module_width,
+    wall_thickness). wall_side is N/S/E/W; offset_mm runs left->right (S/N)
+    or bottom->top (W/E). Furniture takes an absolute centre + rotation.
+    Doors/windows accept an optional label (e.g. "D1"/"W1") placed as MTEXT
+    on the TEXT layer just outside the opening.
+      insert_exterior_door — data: wall_side, offset_mm, width_mm (=1000),
+                        swing ("in"/"out"), label? Opening + leaf + swing arc on AR-DOOR.
+      insert_interior_door — data: wall_side, offset_mm, width_mm (=800),
+                        swing_direction ("in"/"out"), label? Same symbol on AR-DOOR.
+      insert_window   — data: wall_side, offset_mm, width_mm, label? Opening +
+                        double glazing line on AR-WIND.
+      insert_bed      — data: x_mm, y_mm, rotation_deg, bed_type
+                        ("single" 900x2000 / "double" 1400x2000) on FURN.
+      insert_toilet   — data: x_mm, y_mm, rotation_deg. Cistern + bowl on FURN.
+      insert_sink     — data: x_mm, y_mm, rotation_deg. Basin + tap on FURN.
+    """
+    from autocad_mcp import polisnab_standards as ps
+
+    backend = await get_backend()
+    d = data or {}
+
+    if operation == "setup_layers":
+        result = await ps.setup_layers(backend)
+    elif operation == "setup_dimstyle":
+        result = await ps.setup_dimstyle(backend)
+    elif operation == "insert_title_block":
+        result = await ps.insert_title_block(
+            backend,
+            doc_number=d.get("doc_number", ""),
+            product_name=d.get("product_name", ""),
+            scale=d.get("scale", ""),
+            sheet_num=d.get("sheet_num", 1),
+            sheet_total=d.get("sheet_total", 1),
+            developed_by=d.get("developed_by", ""),
+            checked_by=d.get("checked_by", ""),
+            approved_by=d.get("approved_by", ""),
+            litera=d.get("litera"),
+            company_name=d.get("company_name"),
+            block_scale=d.get("block_scale"),
+        )
+    elif operation == "insert_exterior_door":
+        result = await ps.insert_exterior_door(
+            backend, d.get("wall_side", "S"), d.get("offset_mm", 0),
+            d.get("width_mm", 1000.0), d.get("swing", "in"), label=d.get("label"),
+            module_origin=d.get("module_origin"), module_length=d.get("module_length"),
+            module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
+        )
+    elif operation == "insert_interior_door":
+        result = await ps.insert_interior_door(
+            backend, d.get("wall_side", "S"), d.get("offset_mm", 0),
+            d.get("width_mm", 800.0), d.get("swing_direction", "in"), label=d.get("label"),
+            module_origin=d.get("module_origin"), module_length=d.get("module_length"),
+            module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
+        )
+    elif operation == "insert_window":
+        result = await ps.insert_window(
+            backend, d.get("wall_side", "S"), d.get("offset_mm", 0),
+            d.get("width_mm", 1000.0), label=d.get("label"),
+            module_origin=d.get("module_origin"), module_length=d.get("module_length"),
+            module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
+        )
+    elif operation == "insert_bed":
+        result = await ps.insert_bed(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0),
+            d.get("rotation_deg", 0.0), d.get("bed_type", "single"),
+        )
+    elif operation == "insert_toilet":
+        result = await ps.insert_toilet(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+        )
+    elif operation == "insert_sink":
+        result = await ps.insert_sink(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+        )
+    else:
+        return _json({"error": f"Unknown polisnab operation: {operation}"})
+
+    return await add_screenshot_if_available(result, include_screenshot)
+
+
+# ==========================================================================
 # Main entry point
 # ==========================================================================
 

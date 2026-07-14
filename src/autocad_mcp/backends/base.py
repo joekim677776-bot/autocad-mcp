@@ -269,6 +269,31 @@ class AutoCADBackend(ABC):
     async def pid_insert_tank(self, x: float, y: float, tank_type: str, scale: float = 1.0, attributes: dict[str, str] | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
+    # --- Polisnab standards (Phase 1) ---
+
+    async def polisnab_setup_layers(self, layers_str: str) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def polisnab_setup_dimstyle(self, name: str, dimscale: float, dimtxt: float, dimasz: float, dimexe: float, dimexo: float) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def polisnab_insert_title_block(
+        self,
+        *,
+        doc_number: str,
+        product_name: str,
+        scale: str,
+        sheet_num: int = 1,
+        sheet_total: int = 1,
+        developed_by: str = "",
+        checked_by: str = "",
+        approved_by: str = "",
+        litera: str | None = None,
+        company_name: str = "",
+        block_scale: float = 30.0,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
     # --- View ---
 
     async def zoom_extents(self) -> CommandResult:

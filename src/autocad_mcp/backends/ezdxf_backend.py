@@ -727,6 +727,64 @@ class EzdxfBackend(AutoCADBackend):
         })
         return CommandResult(ok=True, payload={"entity_type": "TEXT", "handle": e.dxf.handle})
 
+    # --- Polisnab standards (Phase 1) ---
+
+    async def polisnab_setup_layers(self, layers_str) -> CommandResult:
+        if not self._doc:
+            return CommandResult(ok=False, error="No document open")
+        # Ensure standard linetypes (CENTER, etc.) exist before assigning them.
+        try:
+            from ezdxf.tools.standards import setup_linetypes
+
+            setup_linetypes(self._doc)
+        except Exception:
+            pass
+        created = []
+        for spec in layers_str.split(";"):
+            if not spec.strip():
+                continue
+            parts = spec.split(",")
+            name = parts[0].strip()
+            color = int(parts[1]) if len(parts) > 1 and parts[1].strip() else 7
+            linetype = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "Continuous"
+            # Graceful fallback if a non-continuous linetype could not be loaded.
+            if linetype.upper() != "CONTINUOUS" and linetype not in self._doc.linetypes:
+                linetype = "Continuous"
+            if not name:
+                continue
+            if name in self._doc.layers:
+                layer = self._doc.layers.get(name)
+                layer.color = color
+                layer.dxf.linetype = linetype
+            else:
+                self._doc.layers.add(name, color=color, linetype=linetype)
+            created.append(name)
+        return CommandResult(ok=True, payload={"layers": created, "count": len(created)})
+
+    async def polisnab_setup_dimstyle(self, name, dimscale, dimtxt, dimasz, dimexe, dimexo) -> CommandResult:
+        if not self._doc:
+            return CommandResult(ok=False, error="No document open")
+        if name in self._doc.dimstyles:
+            dimstyle = self._doc.dimstyles.get(name)
+        else:
+            dimstyle = self._doc.dimstyles.new(name)
+        a = dimstyle.dxf
+        # Tunable numeric settings (from the Python spec).
+        a.dimscale = dimscale
+        a.dimtxt = dimtxt
+        a.dimasz = dimasz
+        a.dimexe = dimexe
+        a.dimexo = dimexo
+        # Fixed categorical settings (SPDS/ESKD conventions).
+        a.dimlunit = 2   # decimal units (mm)
+        a.dimdec = 0     # integer precision, no decimals
+        a.dimtad = 1     # text above the dimension line
+        a.dimtih = 0     # inside text aligned with the dimension line
+        a.dimtoh = 0     # outside text aligned with the dimension line
+        a.dimjust = 0    # text centred along the dimension line
+        # Closed-filled arrowheads are the ezdxf default (empty DIMBLK); leave as-is.
+        return CommandResult(ok=True, payload={"dimstyle": name, "dimscale": dimscale})
+
     # --- View ---
 
     async def get_screenshot(self) -> CommandResult:

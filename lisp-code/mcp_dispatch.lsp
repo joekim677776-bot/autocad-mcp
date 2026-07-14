@@ -421,6 +421,16 @@
     ((= cmd-name "pid-list-symbols")
      (mcp-cmd-pid-list-symbols params-json))
 
+    ;; --- Polisnab standards (Phase 1) ---
+    ((= cmd-name "polisnab-setup-layers")
+     (mcp-cmd-polisnab-setup-layers params-json))
+
+    ((= cmd-name "polisnab-setup-dimstyle")
+     (mcp-cmd-polisnab-setup-dimstyle params-json))
+
+    ((= cmd-name "polisnab-insert-title-block")
+     (mcp-cmd-polisnab-insert-title-block params-json))
+
     ;; --- Unknown ---
     (t (cons nil (strcat "Unknown command: " cmd-name)))
   )
@@ -1268,6 +1278,339 @@
     )
     (cons nil (strcat "Block '" name "' not found"))
   )
+)
+
+;; -----------------------------------------------------------------------
+;; Polisnab standards (Phase 1)
+;; -----------------------------------------------------------------------
+
+(defun polisnab-ensure-center-ltype ( / dxf )
+  "Define the CENTER linetype via entmake from its dash pattern. This avoids
+   the -LINETYPE _LOAD command entirely: that command's file-name prompt could
+   be left pending (even with FILEDIA=0 on some AutoCAD builds) and poison the
+   following calls with 'bad order function: COMMAND'. entmake never touches
+   the command line, so it cannot leave that state behind. Idempotent."
+  (if (not (tblsearch "LTYPE" "CENTER"))
+    (progn
+      ;; acad CENTER: A,1.25,-.25,.25,-.25  (total pattern length 2.0)
+      (setq dxf
+        (list
+          (cons 0 "LTYPE")
+          (cons 100 "AcDbSymbolTableRecord")
+          (cons 100 "AcDbLinetypeTableRecord")
+          (cons 2 "CENTER")
+          (cons 70 0)
+          (cons 3 "Center ____ _ ____ _ ____ _ ____")
+          (cons 72 65)
+          (cons 73 4)
+          (cons 40 2.0)
+          (cons 49 1.25)  (cons 74 0)
+          (cons 49 -0.25) (cons 74 0)
+          (cons 49 0.25)  (cons 74 0)
+          (cons 49 -0.25) (cons 74 0)
+        )
+      )
+      (vl-catch-all-apply 'entmake (list dxf))
+    )
+  )
+)
+
+(defun polisnab-make-layer (name color-int linetype / existing dxf)
+  "Create or update a layer purely via entmake/entmod (no -LAYER command, so
+   no command-line state to leak). CENTER must already be defined for a layer
+   that references it. Returns T."
+  (setq existing (tblobjname "LAYER" name))
+  (if existing
+    (progn                                  ; update color + linetype in place
+      (setq dxf (entget existing))
+      (setq dxf (subst (cons 62 color-int) (assoc 62 dxf) dxf))
+      (if (assoc 6 dxf)
+        (setq dxf (subst (cons 6 linetype) (assoc 6 dxf) dxf))
+        (setq dxf (append dxf (list (cons 6 linetype))))
+      )
+      (entmod dxf)
+    )
+    (entmake                                ; fresh layer table record
+      (list
+        (cons 0 "LAYER")
+        (cons 100 "AcDbSymbolTableRecord")
+        (cons 100 "AcDbLayerTableRecord")
+        (cons 2 name)
+        (cons 70 0)
+        (cons 62 color-int)
+        (cons 6 linetype)
+      )
+    )
+  )
+  T
+)
+
+(defun mcp-cmd-polisnab-setup-layers (params / layers-str specs spec parts name color linetype created need-nonstd)
+  "Create the Polisnab layer standard.
+   layers_str format: name,color,linetype;name,color,linetype;..."
+  (setq layers-str (mcp-json-get-string params "layers_str"))
+  (if (or (not layers-str) (= layers-str ""))
+    (cons nil "layers_str required (format: name,color,linetype;...)")
+    (progn
+      (setq specs (mcp-split-string layers-str ";"))
+      ;; If any layer needs a non-continuous linetype, define CENTER once.
+      (setq need-nonstd nil)
+      (foreach spec specs
+        (setq parts (mcp-split-string spec ","))
+        (if (and (caddr parts) (/= (strcase (caddr parts)) "CONTINUOUS"))
+          (setq need-nonstd T)
+        )
+      )
+      (if need-nonstd (polisnab-ensure-center-ltype))
+      (setq created "")
+      (foreach spec specs
+        (setq parts (mcp-split-string spec ","))
+        (setq name (car parts))
+        (setq color (if (cadr parts) (cadr parts) "7"))
+        (setq linetype (if (caddr parts) (caddr parts) "CONTINUOUS"))
+        ;; Fall back to Continuous if the linetype is still not available.
+        (if (and (/= (strcase linetype) "CONTINUOUS") (not (tblsearch "LTYPE" linetype)))
+          (setq linetype "CONTINUOUS")
+        )
+        (if (and name (> (strlen name) 0))
+          (progn
+            (polisnab-make-layer name (atoi color) linetype)
+            (if (> (strlen created) 0) (setq created (strcat created ",")))
+            (setq created (strcat created "\"" name "\""))
+          )
+        )
+      )
+      (cons T (strcat "{\"layers\":[" created "]}"))
+    )
+  )
+)
+
+(defun mcp-cmd-polisnab-setup-dimstyle (params / name dimscale dimtxt dimasz dimexe dimexo)
+  "Create/redefine the POLISNAB-DIM dimension style and make it current."
+  (setq name (mcp-json-get-string params "name"))
+  (setq dimscale (mcp-json-get-number params "dimscale"))
+  (setq dimtxt (mcp-json-get-number params "dimtxt"))
+  (setq dimasz (mcp-json-get-number params "dimasz"))
+  (setq dimexe (mcp-json-get-number params "dimexe"))
+  (setq dimexo (mcp-json-get-number params "dimexo"))
+  (if (not name) (setq name "POLISNAB-DIM"))
+  (if (not dimscale) (setq dimscale 40.0))
+  (if (not dimtxt) (setq dimtxt 2.5))
+  (if (not dimasz) (setq dimasz 2.5))
+  (if (not dimexe) (setq dimexe 1.25))
+  (if (not dimexo) (setq dimexo 1.5))
+  ;; Tunable numeric settings (from the Python spec).
+  (setvar "DIMSCALE" dimscale)
+  (setvar "DIMTXT" dimtxt)
+  (setvar "DIMASZ" dimasz)
+  (setvar "DIMEXE" dimexe)
+  (setvar "DIMEXO" dimexo)
+  ;; Fixed categorical settings (SPDS/ESKD conventions).
+  (setvar "DIMLUNIT" 2)   ; decimal units (mm)
+  (setvar "DIMDEC" 0)     ; integer precision, no decimals
+  (setvar "DIMTAD" 1)     ; text above the dimension line
+  (setvar "DIMTIH" 0)     ; inside text aligned with the dimension line
+  (setvar "DIMTOH" 0)     ; outside text aligned with the dimension line
+  (setvar "DIMJUST" 0)    ; text centred along the dimension line
+  (setvar "DIMSAH" 0)     ; single arrowhead block for both ends
+  (vl-catch-all-apply 'setvar (list "DIMBLK" ""))   ; "" = closed-filled arrows
+  (vl-catch-all-apply 'setvar (list "DIMTXSTY" "Standard"))  ; uniform text style
+  ;; Save the named style (redefine with _Y if it already exists); Save makes it current.
+  (if (tblsearch "DIMSTYLE" name)
+    (command "_.-DIMSTYLE" "_S" name "_Y")
+    (command "_.-DIMSTYLE" "_S" name)
+  )
+  (cons T (strcat "{\"dimstyle\":\"" name "\",\"dimscale\":" (rtos dimscale 2 2) ",\"current\":true}"))
+)
+
+;; -----------------------------------------------------------------------
+;; Polisnab title block — main inscription, GOST 2.104 Form 1 (Phase 2)
+;;
+;; Block "TITLE-BLOCK": 185 x 55 mm frame (origin at bottom-left), built
+;; with entmake so it carries editable ATTDEF attributes. Static Cyrillic
+;; labels and dynamic attribute values are emitted as AutoCAD "\U+XXXX"
+;; unicode escapes and drawn in a TrueType style (Arial) so they render
+;; regardless of the drawing code page.
+;; -----------------------------------------------------------------------
+
+(defun tb-ru (codes / s c)
+  "Build an AutoCAD \\U+XXXX unicode string from a list of 4-hex-digit code strings."
+  (setq s "")
+  (foreach c codes (setq s (strcat s (chr 92) "U+" c)))
+  s
+)
+
+(defun tb-unicode (s / out i n ch bs)
+  "Convert JSON \\uXXXX escapes (as read literally from the command file) into
+   AutoCAD \\U+XXXX unicode escapes. Non-escape characters pass through."
+  (if (null s)
+    nil
+    (progn
+      (setq bs (chr 92) out "" i 1 n (strlen s))
+      (while (<= i n)
+        (setq ch (substr s i 1))
+        (if (and (= ch bs) (<= (+ i 5) n) (= (strcase (substr s (1+ i) 1)) "U"))
+          (progn
+            (setq out (strcat out bs "U+" (substr s (+ i 2) 4)))
+            (setq i (+ i 6))
+          )
+          (progn (setq out (strcat out ch)) (setq i (1+ i)))
+        )
+      )
+      out
+    )
+  )
+)
+
+(defun tb-line (x1 y1 x2 y2)
+  "entmake a LINE on layer 0 into the currently-open block definition."
+  (entmake (list '(0 . "LINE") '(100 . "AcDbEntity") '(8 . "0") '(100 . "AcDbLine")
+                 (cons 10 (list x1 y1 0.0)) (cons 11 (list x2 y2 0.0))))
+)
+
+(defun tb-text (str x y h)
+  "entmake a middle-centre TEXT in the Arial style on layer 0."
+  (entmake (list '(0 . "TEXT") '(100 . "AcDbEntity") '(8 . "0") '(100 . "AcDbText")
+                 (cons 10 (list x y 0.0)) (cons 40 h) (cons 1 str) '(7 . "POLISNAB-TB")
+                 '(72 . 1) (cons 11 (list x y 0.0)) '(100 . "AcDbText") '(73 . 2)))
+)
+
+(defun tb-attdef (tag prompt x y h)
+  "entmake a middle-centre ATTDEF (editable attribute) in the Arial style on layer 0."
+  (entmake (list '(0 . "ATTDEF") '(100 . "AcDbEntity") '(8 . "0") '(100 . "AcDbText")
+                 (cons 10 (list x y 0.0)) (cons 40 h) '(1 . "") '(7 . "POLISNAB-TB")
+                 '(72 . 1) (cons 11 (list x y 0.0))
+                 '(100 . "AcDbAttributeDefinition") (cons 3 prompt) (cons 2 tag)
+                 '(70 . 0) '(74 . 2)))
+)
+
+(defun tb-ensure-style ( / )
+  "Create a TrueType (Arial) text style for the title block if absent — needed
+   so Cyrillic \\U+XXXX text renders instead of showing as '?'."
+  (if (not (tblsearch "STYLE" "POLISNAB-TB"))
+    (progn
+      (setvar "FILEDIA" 0)
+      (vl-catch-all-apply 'command
+        (list "_.-STYLE" "POLISNAB-TB" "arial.ttf" 0.0 1.0 0.0 "_N" "_N"))
+      (setvar "FILEDIA" 1)
+    )
+  )
+)
+
+(defun tb-ensure-block ( / )
+  "Define the TITLE-BLOCK block (GOST 2.104 form 1) via entmake if it does not
+   yet exist. Geometry is block-local mm, origin at the bottom-left corner."
+  (if (not (tblsearch "BLOCK" "TITLE-BLOCK"))
+    (progn
+      (entmake (list '(0 . "BLOCK") '(8 . "0") '(2 . "TITLE-BLOCK")
+                     '(70 . 2) '(10 0.0 0.0 0.0)))
+      ;; --- outer frame ---
+      (tb-line 0 0 185 0) (tb-line 185 0 185 55)
+      (tb-line 185 55 0 55) (tb-line 0 55 0 0)
+      ;; --- vertical grid ---
+      (tb-line 7 25 7 55)      ; changes-table 1st divider (top-left only)
+      (tb-line 17 0 17 55)     ; label | value divider
+      (tb-line 40 0 40 55)
+      (tb-line 55 0 55 55)
+      (tb-line 65 0 65 55)     ; left block | right block
+      (tb-line 85 15 85 25)    ; Lit. | Massa
+      (tb-line 110 15 110 25)  ; Massa | Masshtab
+      (tb-line 135 15 135 25)  ; Masshtab | List
+      (tb-line 160 15 160 25)  ; List | Listov
+      ;; --- horizontal grid, left block (x 0..65) ---
+      (tb-line 0 5 65 5) (tb-line 0 10 65 10) (tb-line 0 15 65 15) (tb-line 0 20 65 20)
+      (tb-line 0 25 185 25)    ; full-width band separator
+      (tb-line 0 30 65 30) (tb-line 0 35 65 35) (tb-line 0 40 65 40)
+      (tb-line 0 45 65 45) (tb-line 0 50 65 50)
+      ;; --- horizontal grid, right block (x 65..185) ---
+      (tb-line 65 40 185 40)   ; product name | doc number
+      (tb-line 65 20 185 20)   ; band header | band value
+      (tb-line 65 15 185 15)   ; band | organization
+      ;; --- static labels: changes-table header (y 50..55) ---
+      (tb-text (tb-ru '("0418" "0437" "043C" "002E")) 3.5 52.5 2.0)                               ; Изм.
+      (tb-text (tb-ru '("041B" "0438" "0441" "0442")) 12.0 52.5 2.0)                              ; Лист
+      (tb-text (tb-ru '("2116" "0020" "0434" "043E" "043A" "0443" "043C" "002E")) 28.5 52.5 2.0)  ; № докум.
+      (tb-text (tb-ru '("041F" "043E" "0434" "043F" "002E")) 47.5 52.5 2.0)                       ; Подп.
+      (tb-text (tb-ru '("0414" "0430" "0442" "0430")) 60.0 52.5 2.0)                              ; Дата
+      ;; --- static labels: signature block (x 0..17) ---
+      (tb-text (tb-ru '("0420" "0430" "0437" "0440" "0430" "0431" "002E")) 8.5 22.5 2.5)          ; Разраб.
+      (tb-text (tb-ru '("041F" "0440" "043E" "0432" "002E")) 8.5 17.5 2.5)                        ; Пров.
+      (tb-text (tb-ru '("0422" "002E" "043A" "043E" "043D" "0442" "0440" "002E")) 8.5 12.5 2.5)   ; Т.контр.
+      (tb-text (tb-ru '("041D" "002E" "043A" "043E" "043D" "0442" "0440" "002E")) 8.5 7.5 2.5)    ; Н.контр.
+      (tb-text (tb-ru '("0423" "0442" "0432" "002E")) 8.5 2.5 2.5)                                ; Утв.
+      ;; --- static labels: Lit / Massa / Masshtab / List / Listov (y 20..25) ---
+      (tb-text (tb-ru '("041B" "0438" "0442" "002E")) 75.0 22.5 2.0)                              ; Лит.
+      (tb-text (tb-ru '("041C" "0430" "0441" "0441" "0430")) 97.5 22.5 2.0)                       ; Масса
+      (tb-text (tb-ru '("041C" "0430" "0441" "0448" "0442" "0430" "0431")) 122.5 22.5 2.0)        ; Масштаб
+      (tb-text (tb-ru '("041B" "0438" "0441" "0442")) 147.5 22.5 2.0)                             ; Лист
+      (tb-text (tb-ru '("041B" "0438" "0441" "0442" "043E" "0432")) 172.5 22.5 2.0)               ; Листов
+      ;; --- editable attributes ---
+      (tb-attdef "PRODUCT_NAME" "Naimenovanie izdeliya" 125.0 47.5 4.0)
+      (tb-attdef "DOC_NUMBER"   "Oboznachenie dokumenta" 125.0 32.5 5.0)
+      (tb-attdef "LITERA"       "Litera stadii" 75.0 17.5 2.5)
+      (tb-attdef "SCALE"        "Masshtab" 122.5 17.5 2.5)
+      (tb-attdef "SHEET_NUM"    "List" 147.5 17.5 2.5)
+      (tb-attdef "SHEET_TOTAL"  "Listov" 172.5 17.5 2.5)
+      (tb-attdef "DEVELOPED_BY" "Razrabotal (FIO)" 28.5 22.5 2.5)
+      (tb-attdef "CHECKED_BY"   "Proveril (FIO)" 28.5 17.5 2.5)
+      (tb-attdef "APPROVED_BY"  "Utverdil (FIO)" 28.5 2.5 2.5)
+      (tb-attdef "COMPANY_NAME" "Organizatsiya" 125.0 7.5 3.5)
+      (entmake '((0 . "ENDBLK") (8 . "0")))
+    )
+  )
+)
+
+(defun mcp-cmd-polisnab-insert-title-block
+       (params / scale doc-num prod-name scale-txt sheet-num sheet-tot
+                 dev chk app litera company emin emax bw bh gap ix iy ins
+                 old-attreq old-attdia old-clayer)
+  "Insert the TITLE-BLOCK block at the bottom-right of the drawing extents and
+   fill its attributes from the supplied values."
+  (setq scale (mcp-json-get-number params "block_scale"))
+  (if (not scale) (setq scale 30.0))
+  (setq doc-num   (tb-unicode (mcp-json-get-string params "doc_number")))
+  (setq prod-name (tb-unicode (mcp-json-get-string params "product_name")))
+  (setq scale-txt (tb-unicode (mcp-json-get-string params "scale")))
+  (setq sheet-num (mcp-json-get-number params "sheet_num"))
+  (setq sheet-tot (mcp-json-get-number params "sheet_total"))
+  (setq dev       (tb-unicode (mcp-json-get-string params "developed_by")))
+  (setq chk       (tb-unicode (mcp-json-get-string params "checked_by")))
+  (setq app       (tb-unicode (mcp-json-get-string params "approved_by")))
+  (setq litera    (tb-unicode (mcp-json-get-string params "litera")))
+  (setq company   (tb-unicode (mcp-json-get-string params "company_name")))
+  ;; Prerequisites: text style, layer, block definition.
+  (tb-ensure-style)
+  (ensure_layer_exists "TITLE-BLOCK" "7" "CONTINUOUS")
+  (tb-ensure-block)
+  ;; Placement: bottom-right of the current extents, just below the drawing.
+  (command "_.ZOOM" "_E")
+  (setq emin (getvar "EXTMIN") emax (getvar "EXTMAX"))
+  (setq bw (* 185.0 scale) bh (* 55.0 scale) gap (* 0.15 bh))
+  (setq ix (- (car emax) bw))
+  (setq iy (- (cadr emin) gap bh))
+  ;; Insert on the TITLE-BLOCK layer with default (empty) attributes, then fill.
+  (setq old-attreq (getvar "ATTREQ") old-attdia (getvar "ATTDIA")
+        old-clayer (getvar "CLAYER"))
+  (setvar "ATTDIA" 0) (setvar "ATTREQ" 0)
+  (setvar "CLAYER" "TITLE-BLOCK")
+  (command "_.-INSERT" "TITLE-BLOCK" (list ix iy 0.0) scale scale 0.0)
+  (setq ins (entlast))
+  (if prod-name  (set_attribute_value ins "PRODUCT_NAME" prod-name))
+  (if doc-num    (set_attribute_value ins "DOC_NUMBER" doc-num))
+  (if litera     (set_attribute_value ins "LITERA" litera))
+  (if scale-txt  (set_attribute_value ins "SCALE" scale-txt))
+  (if sheet-num  (set_attribute_value ins "SHEET_NUM" (itoa (fix sheet-num))))
+  (if sheet-tot  (set_attribute_value ins "SHEET_TOTAL" (itoa (fix sheet-tot))))
+  (if dev        (set_attribute_value ins "DEVELOPED_BY" dev))
+  (if chk        (set_attribute_value ins "CHECKED_BY" chk))
+  (if app        (set_attribute_value ins "APPROVED_BY" app))
+  (if company    (set_attribute_value ins "COMPANY_NAME" company))
+  (setvar "ATTREQ" old-attreq) (setvar "ATTDIA" old-attdia)
+  (setvar "CLAYER" old-clayer)
+  (cons T (strcat "{\"entity_type\":\"INSERT\",\"handle\":\""
+                  (cdr (assoc 5 (entget ins)))
+                  "\",\"block\":\"TITLE-BLOCK\",\"block_scale\":" (rtos scale 2 2)
+                  ",\"insertion\":[" (rtos ix 2 2) "," (rtos iy 2 2) "]}"))
 )
 
 ;; -----------------------------------------------------------------------

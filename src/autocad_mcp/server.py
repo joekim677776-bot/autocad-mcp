@@ -558,5 +558,16 @@ def main():
         ],
     )
 
+    # Warm heavy backend imports (ezdxf → numpy/fontTools C-extensions) BEFORE
+    # the stdio event loop starts. Importing them lazily from inside a request
+    # handler deadlocks under the anyio stdio server on some environments
+    # (observed: Windows + Python 3.14 + mcp 1.28). Pre-importing here makes the
+    # later `from ... import EzdxfBackend` in get_backend() a no-op lookup.
+    try:
+        import autocad_mcp.backends.ezdxf_backend  # noqa: F401
+        import autocad_mcp.backends.file_ipc  # noqa: F401
+    except Exception as e:  # pragma: no cover - warming is best-effort
+        log.warning("backend_prewarm_failed", error=str(e))
+
     log.info("autocad_mcp_starting", version="3.1.0")
     mcp.run(transport="stdio")

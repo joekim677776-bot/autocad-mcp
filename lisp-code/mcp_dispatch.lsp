@@ -247,6 +247,12 @@
     ((= cmd-name "create-hatch")
      (mcp-cmd-create-hatch params-json))
 
+    ((= cmd-name "create-solid")
+     (mcp-cmd-create-solid params-json))
+
+    ((= cmd-name "erase-window")
+     (mcp-cmd-erase-window params-json))
+
     ;; --- Entity queries ---
     ((= cmd-name "entity-count")
      (mcp-cmd-entity-count params-json))
@@ -516,10 +522,11 @@
   (cons T (strcat "{\"entity_type\":\"CIRCLE\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
-(defun mcp-cmd-create-polyline (params / pts-str closed layer pairs pt-str cx cy)
+(defun mcp-cmd-create-polyline (params / pts-str closed layer linetype pairs pt-str cx cy ent)
   (setq pts-str (mcp-json-get-string params "points_str"))
   (setq closed (mcp-json-get-string params "closed"))
   (setq layer (mcp-json-get-string params "layer"))
+  (setq linetype (mcp-json-get-string params "linetype"))
   (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
   (if (not pts-str)
     (cons nil "points_str required (format: x1,y1;x2,y2;...)")
@@ -532,8 +539,17 @@
         (command (list cx cy 0.0))
       )
       (if (= closed "1") (command "_C") (command ""))
+      (setq ent (entlast))
+      ;; Optional per-entity linetype (e.g. dashed door swing arcs). Defined via
+      ;; entmake — never the -LINETYPE _LOAD dialog.
+      (if (and linetype (> (strlen linetype) 0) (/= (strcase linetype) "CONTINUOUS"))
+        (progn
+          (if (= (strcase linetype) "POLISNAB-DASH") (polisnab-ensure-dash-ltype))
+          (if (tblsearch "LTYPE" linetype) (polisnab-set-entity-linetype ent linetype))
+        )
+      )
       (cons T (strcat "{\"entity_type\":\"LWPOLYLINE\",\"handle\":\""
-                      (cdr (assoc 5 (entget (entlast)))) "\"}"))
+                      (cdr (assoc 5 (entget ent))) "\"}"))
     )
   )
 )
@@ -829,12 +845,17 @@
   (setq x (mcp-json-get-number params "x"))
   (setq y (mcp-json-get-number params "y"))
   (setq width (mcp-json-get-number params "width"))
-  (setq text (mcp-json-get-string params "text"))
+  ;; Convert JSON \uXXXX escapes (Cyrillic labels like ВХОД/ОКНО) to AutoCAD
+  ;; \U+XXXX unicode, and draw in the TrueType (Arial) style so they render.
+  (setq text (tb-unicode (mcp-json-get-string params "text")))
   (setq height (mcp-json-get-number params "height"))
   (if (not height) (setq height 2.5))
   (setq layer (mcp-json-get-string params "layer"))
   (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
-  (command "_MTEXT" (list x y 0.0) "_H" height "_W" width text "")
+  (polisnab-ensure-text-style)
+  ;; _J _MC = middle-centre attachment, so the text is centred ON the insertion
+  ;; point (the opening midpoint) instead of growing right from a left corner.
+  (command "_MTEXT" (list x y 0.0) "_J" "_MC" "_S" "POLISNAB-TB" "_H" height "_W" width text "")
   (cons T (strcat "{\"entity_type\":\"MTEXT\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}"))
 )
 
@@ -852,6 +873,98 @@
       (cons T (strcat "{\"entity_type\":\"HATCH\",\"handle\":\"" (cdr (assoc 5 (entget (entlast)))) "\"}")))
     (cons nil "Entity not found for hatching")
   )
+)
+
+;; --- Filled 2D SOLID (wall body) ---
+;; Deterministic filled quad via entmake — no dialog, no prompt-chaining.
+;; points_str = "x,y;x,y;x,y;x,y" as 4 corners in CCW order (c0 c1 c2 c3).
+;; A SOLID's fill order is a "bowtie": DXF 10/11/12/13 = c0/c1/c3/c2.
+
+(defun mcp-cmd-create-solid (params / pts-str layer pairs pt-str coords ptlist)
+  (setq pts-str (mcp-json-get-string params "points_str"))
+  (setq layer (mcp-json-get-string params "layer"))
+  (if layer (progn (ensure_layer_exists layer "white" "CONTINUOUS") (set_current_layer layer)))
+  (if (not pts-str)
+    (cons nil "points_str required (4 corners: x,y;x,y;x,y;x,y)")
+    (progn
+      (setq pairs (mcp-split-string pts-str ";"))
+      (setq ptlist '())
+      (foreach pt-str pairs
+        (setq coords (mcp-split-string pt-str ","))
+        (setq ptlist (cons (list (atof (car coords)) (atof (cadr coords)) 0.0) ptlist))
+      )
+      (setq ptlist (reverse ptlist))
+      (if (< (length ptlist) 4)
+        (cons nil "create-solid needs 4 corners")
+        (progn
+          (entmake (list
+            (cons 0 "SOLID")
+            (cons 8 (if layer layer (getvar "CLAYER")))
+            (cons 10 (nth 0 ptlist))
+            (cons 11 (nth 1 ptlist))
+            (cons 12 (nth 3 ptlist))
+            (cons 13 (nth 2 ptlist))
+          ))
+          (cons T (strcat "{\"entity_type\":\"SOLID\",\"handle\":\""
+                          (cdr (assoc 5 (entget (entlast)))) "\"}"))
+        )
+      )
+    )
+  )
+)
+
+;; --- Erase wall entities overlapping a window (for cutting openings) ---
+;; VIEW-INDEPENDENT: ssget "_C"/"_W"/"_CP" only consider entities inside the
+;; current viewport, so an opening cut while the view was zoomed elsewhere
+;; silently selected nothing (openings vanished depending on prior zoom state).
+;; Instead gather the whole database on the wall layers (ssget "_X") and erase
+;; those whose bounding box overlaps the window rect — same semantics for our
+;; axis-aligned walls, but independent of the current view. Restricted to the
+;; wall layers so leaf/furniture/text on other layers are never touched.
+
+(defun mcp-cmd-erase-window (params / x1 y1 x2 y2 wlo-x whi-x wlo-y whi-y
+                                       ss i ent edata etype pts n)
+  (setq x1 (mcp-json-get-number params "x1"))
+  (setq y1 (mcp-json-get-number params "y1"))
+  (setq x2 (mcp-json-get-number params "x2"))
+  (setq y2 (mcp-json-get-number params "y2"))
+  (setq wlo-x (min x1 x2) whi-x (max x1 x2) wlo-y (min y1 y2) whi-y (max y1 y2))
+  (setq ss (ssget "_X"
+             (list (cons -4 "<OR")
+                   (cons 8 "AR-WALL")
+                   (cons 8 "AR-WALL-INSUL")
+                   (cons -4 "OR>"))))
+  (setq n 0)
+  (if ss
+    (progn
+      (setq i 0)
+      (while (< i (sslength ss))
+        (setq ent (ssname ss i) edata (entget ent) etype (cdr (assoc 0 edata)) pts nil)
+        (cond
+          ((= etype "LINE")
+           (setq pts (list (cdr (assoc 10 edata)) (cdr (assoc 11 edata)))))
+          ((= etype "SOLID")
+           (setq pts (list (cdr (assoc 10 edata)) (cdr (assoc 11 edata))
+                           (cdr (assoc 12 edata)) (cdr (assoc 13 edata)))))
+          ((= etype "LWPOLYLINE")
+           (setq pts (mapcar 'cdr (vl-remove-if-not '(lambda (x) (= (car x) 10)) edata))))
+        )
+        (if pts
+          (progn
+            ;; bbox overlap test (axis-aligned)
+            (if (and (<= wlo-x (apply 'max (mapcar 'car pts)))
+                     (>= whi-x (apply 'min (mapcar 'car pts)))
+                     (<= wlo-y (apply 'max (mapcar 'cadr pts)))
+                     (>= whi-y (apply 'min (mapcar 'cadr pts))))
+              (progn (entdel ent) (setq n (1+ n)))
+            )
+          )
+        )
+        (setq i (1+ i))
+      )
+    )
+  )
+  (cons T (strcat "{\"erased\":" (itoa n) "}"))
 )
 
 ;; --- Entity query: get ---
@@ -1315,6 +1428,85 @@
   )
 )
 
+(defun polisnab-ensure-dash-ltype ( / dxf )
+  "Define the POLISNAB-DASH linetype (model-scaled dashes: 120 mm dash / 80 mm
+   gap) via entmake — same command-line-free approach as CENTER, so it never
+   touches the -LINETYPE _LOAD file dialog. Model-scaled so dashes read on a
+   ~6000 mm module drawing at LTSCALE 1. Idempotent."
+  (if (not (tblsearch "LTYPE" "POLISNAB-DASH"))
+    (progn
+      (setq dxf
+        (list
+          (cons 0 "LTYPE")
+          (cons 100 "AcDbSymbolTableRecord")
+          (cons 100 "AcDbLinetypeTableRecord")
+          (cons 2 "POLISNAB-DASH")
+          (cons 70 0)
+          (cons 3 "Polisnab dashed __ __ __")
+          (cons 72 65)
+          (cons 73 2)
+          (cons 40 200.0)
+          (cons 49 120.0) (cons 74 0)
+          (cons 49 -80.0) (cons 74 0)
+        )
+      )
+      (vl-catch-all-apply 'entmake (list dxf))
+    )
+  )
+)
+
+(defun polisnab-ensure-text-style ( / )
+  "Define the TrueType (Arial) text style POLISNAB-TB via entmake so Cyrillic
+   labels render. entmake never touches the command line — unlike (command
+   \"_.-STYLE\" ...), which poisons the dispatcher with 'bad order function:
+   COMMAND' when called mid-dispatch. Idempotent."
+  (if (not (tblsearch "STYLE" "POLISNAB-TB"))
+    (vl-catch-all-apply 'entmake
+      (list
+        (list
+          (cons 0 "STYLE")
+          (cons 100 "AcDbSymbolTableRecord")
+          (cons 100 "AcDbTextStyleTableRecord")
+          (cons 2 "POLISNAB-TB")
+          (cons 70 0)
+          (cons 40 0.0)      ; height (0 = not fixed)
+          (cons 41 1.0)      ; width factor
+          (cons 50 0.0)      ; oblique angle
+          (cons 71 0)        ; generation flags
+          (cons 42 2.5)      ; last height used
+          (cons 3 "arial.ttf")  ; TrueType font file
+          (cons 4 "")           ; big-font file
+        )
+      )
+    )
+  )
+)
+
+(defun polisnab-set-entity-linetype (ent lt / dxf f)
+  "Set entity ``ent``'s linetype to ``lt`` via entmod (adds/updates DXF 6). For
+   an LWPOLYLINE also enable linetype generation (flag 128, 'plinegen') so the
+   dash pattern runs continuously across vertices — otherwise it restarts on
+   each short arc-chord segment and renders solid."
+  (setq dxf (entget ent))
+  (if (assoc 6 dxf)
+    (setq dxf (subst (cons 6 lt) (assoc 6 dxf) dxf))
+    (setq dxf (append dxf (list (cons 6 lt))))
+  )
+  (if (= (cdr (assoc 0 dxf)) "LWPOLYLINE")
+    (progn
+      (setq f (cdr (assoc 70 dxf)))
+      (if (not f) (setq f 0))
+      (if (= (logand f 128) 0)
+        (if (assoc 70 dxf)
+          (setq dxf (subst (cons 70 (+ f 128)) (assoc 70 dxf) dxf))
+          (setq dxf (append dxf (list (cons 70 (+ f 128)))))
+        )
+      )
+    )
+  )
+  (vl-catch-all-apply 'entmod (list dxf))
+)
+
 (defun polisnab-make-layer (name color-int linetype / existing dxf)
   "Create or update a layer purely via entmake/entmod (no -LAYER command, so
    no command-line state to leak). CENTER must already be defined for a layer
@@ -1628,6 +1820,14 @@
       (setq cmd-file (strcat *mcp-ipc-dir* (car cmd-files)))
       (setq json-text (mcp-read-file-lines cmd-file))
 
+      ;; Delete the command file NOW, before dispatching. Otherwise it lingers
+      ;; while we draw; the caller sees our result and writes its NEXT command
+      ;; file, and a later trigger could re-glob this stale file — crossing one
+      ;; command's parameters into another (observed: glazing lines drawn with a
+      ;; neighbouring jamb's coordinates). Read-then-delete-then-dispatch makes
+      ;; each command file live for exactly one dispatch.
+      (vl-file-delete cmd-file)
+
       (if (not json-text)
         (princ "\nMCP: Cannot read command file")
         (progn
@@ -1639,6 +1839,12 @@
             (princ "\nMCP: No command in payload")
             (progn
               (princ (strcat "\nMCP: Dispatching " cmd-name " [" request-id "]"))
+
+              ;; Disable running object snap for the whole command. Every drawing
+              ;; command passes EXACT coordinates, so osnap must never pull a
+              ;; point to nearby geometry — e.g. glazing lines 25 mm off a jamb
+              ;; endpoint were being snapped onto the jamb (2375 -> 2400).
+              (setvar "OSMODE" 0)
 
               ;; Execute via whitelist dispatcher
               (setq result
@@ -1663,9 +1869,6 @@
               (princ (strcat "\nMCP: Done " cmd-name))
             )
           )
-
-          ;; Clean up command file
-          (vl-file-delete cmd-file)
         )
       )
     )

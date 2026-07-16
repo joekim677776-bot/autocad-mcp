@@ -979,6 +979,239 @@ async def insert_chair(
     return d.result(footprint=[round(width, 1), round(depth, 1)])
 
 
+# ---------------------------------------------------------------------------
+# Fixtures / engineering symbols read off reference-studio-module-layout.png
+# ("Душ", "Тумба", "Конвектор", "Сплит-система", "Щит").
+#
+# SIZE PROVENANCE — read this before trusting the defaults.
+# Only the shower carries an explicit dimension tag on the reference
+# ("Душ 1200x1200"), so only IT is a stated size. The other four defaults are
+# typical-product sizes, NOT measurements of this drawing — the reference is an
+# illustrative schematic and disagrees with them. Measured against the bed
+# anchor ("Кровать 1200x2000" -> 9.95 mm/px across, 8.0 mm/px down; same anchor
+# and same caveats as the Стол/Шкаф/Стул block above), the drawn pixel extents
+# are:
+#   Душ         107 x  90 px -> ~1065 x  720 mm   (tagged 1200x1200 -> drawn ~30% under)
+#   Тумба        53 x  46 px -> ~ 527 x  368 mm   (default 450 x 430)
+#   Конвектор    91 x   8 px -> ~ 906 x   64 mm   (default 665 x  95, length parametric)
+#   Сплит         68 x   6 px -> ~ 677 x   48 mm   (default 475 x 142, length parametric)
+#   Щит          57 x  28 px -> ~ 567 x  224 mm   (default 285 x 285 — square, ref is landscape)
+# So the defaults are a reasonable product-catalogue reading, NOT a measurement
+# of this reference and NOT a normative standard. Override via the size
+# arguments wherever a real spec exists.
+# ---------------------------------------------------------------------------
+
+async def insert_shower(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, size_mm: float = 1200.0,
+) -> CommandResult:
+    """Shower plan symbol on FURN — the reference's "Душ" pictogram:
+
+        tray   rounded outer square — the 1200 x 1200 footprint.
+        rim    second rounded square inset 70 mm: the tray's upstand. This is
+               what separates a shower from a plain tiled square at plan scale.
+        drain  two concentric circles (body + grate) in the wall corner, not a
+               single circle — a lone circle reads as a column or a pipe.
+        valve  circle on the -X wall with a short stem back to it — the mixer /
+               riser (вентиль). Without it the square says "there is a tray
+               here" but not "this is plumbed", which is the ambiguity it fixes.
+
+    NO DOOR is drawn — deliberate, not an omission. An earlier version drew a
+    leaf + swing arc; it was dropped. The trade-off that buys: the symbol no
+    longer says which side you enter from, nor reserves the floor the door
+    needs. If a layout has to answer either question, the door belongs back (it
+    is in git history, hinged at the +X end of the +Y side, swinging inward).
+
+    ORIENTATION still matters, but now only for the plumbing: the cabin sits in
+    a CORNER, with building walls at local -X and -Y. rotation_deg = 0 puts them
+    to the west and south. The drain sits in the -X/-Y corner (against the
+    walls, where the pipework is) and the mixer on the -X wall — point them at
+    the real soil stack when placing.
+
+    1200 x 1200 mm — the ONE size on this reference that is explicitly tagged
+    ("Душ 1200x1200"), so it is a stated size, not an estimate. (The tray is
+    actually drawn ~30% under that tag; the tag wins.) Centred on (x_mm, y_mm)."""
+    s = float(size_mm)
+    h = s / 2.0
+    rim = 70.0                          # upstand width, tray edge -> inner basin
+    inset = 170.0                       # drain centre, off the two corner edges
+    drain_r, grate_r = 45.0, 20.0
+    valve_r, valve_off = 55.0, 110.0    # mixer circle, and its centre off the wall
+
+    def pt(px, py):
+        return _place([(px, py)], x_mm, y_mm, rotation_deg)[0]
+
+    d = _Draw(backend, FURN_LAYER)
+    # Tray + upstand.
+    await d.poly(_place(_rrect_local(0.0, 0.0, s, s, 60.0), x_mm, y_mm, rotation_deg))
+    await d.poly(_place(_rrect_local(0.0, 0.0, s - 2 * rim, s - 2 * rim, 40.0),
+                        x_mm, y_mm, rotation_deg))
+    # Drain in the wall corner.
+    dr = pt(-h + inset, -h + inset)
+    await d.circle(dr[0], dr[1], drain_r)
+    await d.circle(dr[0], dr[1], grate_r)
+    # Mixer on the -X wall, mid-side, with a stem tying it back to the wall.
+    vc = pt(-h + valve_off, 0.0)
+    await d.circle(vc[0], vc[1], valve_r)
+    s0, s1 = _place([(-h, 0.0), (-h + valve_off - valve_r, 0.0)],
+                    x_mm, y_mm, rotation_deg)
+    await d.line(s0[0], s0[1], s1[0], s1[1])
+    return d.result(footprint=[s, s])
+
+
+async def insert_nightstand(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, width_mm: float = 450.0, depth_mm: float = 430.0,
+) -> CommandResult:
+    """Nightstand plan symbol on FURN — the reference's "Тумба" pictogram with the
+    drawer read in, so it is not just an anonymous box:
+
+        body    outer rectangle, the 450 x 430 footprint.
+        front   line 40 mm in from the room-facing edge — the drawer/door face.
+                This is what tells the reader which way the тумба opens.
+        handle  short bar centred on that face.
+
+    ``width_mm`` runs along the wall, ``depth_mm`` into the room; centred on
+    (x_mm, y_mm) with the back against local -Y and the drawer opening toward
+    local +Y, so rotation_deg matches the wall it stands against (0 = wall to
+    the south, drawer opening north).
+
+    Size is an ESTIMATE (typical product), not a measured or tagged value — the
+    reference is a schematic and draws this box at ~527 x 368 mm. See the
+    provenance block above."""
+    w, dp = float(width_mm), float(depth_mm)
+    face_off = 40.0                     # drawer face, in from the front edge
+    handle_w, handle_off = 120.0, 20.0  # handle bar, and its offset from the front
+
+    front = dp / 2.0
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(_place(_rect_local(0.0, 0.0, w, dp), x_mm, y_mm, rotation_deg))
+    f0, f1 = _place([(-w / 2.0, front - face_off), (w / 2.0, front - face_off)],
+                    x_mm, y_mm, rotation_deg)
+    await d.line(f0[0], f0[1], f1[0], f1[1])
+    h0, h1 = _place([(-handle_w / 2.0, front - handle_off),
+                     (handle_w / 2.0, front - handle_off)], x_mm, y_mm, rotation_deg)
+    await d.line(h0[0], h0[1], h1[0], h1[1])
+    return d.result(footprint=[w, dp])
+
+
+async def insert_convector(
+    backend: AutoCADBackend, x_mm: float, y_mm: float,
+    length_mm: float = 665.0, rotation_deg: float = 0.0,
+    *, depth_mm: float = 95.0,
+) -> CommandResult:
+    """Convector plan symbol on FURN — the reference's "Конвектор" pictogram with
+    the grille drawn in, which is what actually identifies a convector on a plan:
+
+        case  outer rectangle, length x depth.
+        grille  inner rectangle inset 15 mm.
+        fins  short bars across the grille at ~80 mm centres. The fin pitch is
+              deliberately coarse: at 1:50 a realistic ~10 mm pitch collapses
+              into a black smear, so this is a legible stand-in, not a count of
+              real fins.
+
+    Without the fins this symbol is a thin rectangle — indistinguishable from a
+    shelf, a sill or a duct.
+
+    ``length_mm`` is the panel length along the wall — parametric, since real
+    convectors are sized to the window/wall they sit under (the reference draws
+    two of different lengths). ``depth_mm`` is the panel's fixed 95 mm section.
+    Centred on (x_mm, y_mm), length along local X, wall at local -Y.
+
+    Both figures are ESTIMATES (typical product), not measured or tagged — the
+    reference draws its panel at ~906 x 64 mm. See the provenance block above."""
+    L, dp = float(length_mm), float(depth_mm)
+    inset, pitch = 15.0, 80.0
+
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(_place(_rect_local(0.0, 0.0, L, dp), x_mm, y_mm, rotation_deg))
+    gl, gd = L - 2 * inset, dp - 2 * inset
+    await d.poly(_place(_rect_local(0.0, 0.0, gl, gd), x_mm, y_mm, rotation_deg))
+    # Fins spanning the grille, evenly spaced across its length.
+    n = max(int(gl // pitch), 1)
+    for i in range(1, n):
+        fx = -gl / 2.0 + gl * i / n
+        p0, p1 = _place([(fx, -gd / 2.0), (fx, gd / 2.0)], x_mm, y_mm, rotation_deg)
+        await d.line(p0[0], p0[1], p1[0], p1[1])
+    return d.result(footprint=[L, dp], fins=n - 1)
+
+
+async def insert_split_system(
+    backend: AutoCADBackend, x_mm: float, y_mm: float,
+    length_mm: float = 475.0, rotation_deg: float = 0.0,
+    *, depth_mm: float = 142.0,
+) -> CommandResult:
+    """Split-system indoor unit plan symbol on FURN — the reference's
+    "Сплит-система" pictogram, detailed to read as a real indoor unit:
+
+        body    rounded rectangle whose corner radius is half the depth, so the
+                short ends come out as full semicircles. That pill silhouette is
+                what tells it apart at a glance from the square-cornered
+                convector — the two are otherwise both thin wall-hugging bars.
+        louver  line along the room-facing face, inset 40 mm and spanning the
+                middle 80% of the length: the air outlet. It also disambiguates
+                the orientation, which the bare pill cannot (it is symmetric).
+
+    ``length_mm`` runs along the wall, ``depth_mm`` is the unit's section into
+    the room. Centred on (x_mm, y_mm), length along local X, wall at local -Y —
+    so place the centre depth_mm/2 off the wall's inner face to sit flush.
+
+    Both figures are ESTIMATES (typical product), not measured or tagged — the
+    reference draws its unit at ~677 x 48 mm. See the provenance block above."""
+    L, dp = float(length_mm), float(depth_mm)
+    louver_off, louver_frac = 40.0, 0.8
+
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(_place(_rrect_local(0.0, 0.0, L, dp, dp / 2.0, n=8),
+                        x_mm, y_mm, rotation_deg))
+    lx = L * louver_frac / 2.0
+    ly = dp / 2.0 - louver_off
+    p0, p1 = _place([(-lx, ly), (lx, ly)], x_mm, y_mm, rotation_deg)
+    await d.line(p0[0], p0[1], p1[0], p1[1])
+    return d.result(footprint=[L, dp])
+
+
+async def insert_electrical_panel(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, size_mm: float = 285.0,
+) -> CommandResult:
+    """Electrical-panel plan symbol on FURN — the reference's "Щит" pictogram:
+
+        case  outer square, the 285 x 285 footprint.
+        door  inner square inset 25 mm — the hinged front, which is what makes
+              this read as an enclosure rather than a solid block.
+        bolt  lightning (молния) struck diagonally through it, sized to the door.
+
+    The bolt — not a circle or a dot pattern — is what the reference actually
+    draws, and it is the conventional electrical marker, so it is worth keeping:
+    a bare box would read as just another nightstand at plan scale. It is a
+    single 6-point open polyline running lower-left to upper-right.
+
+    285 x 285 mm square, centred on (x_mm, y_mm); the panel hangs on the wall at
+    local -Y, so rotation_deg matches that wall (0 = wall to the south).
+
+    Size is an ESTIMATE (typical product), not measured or tagged. NOTE the
+    reference draws this box LANDSCAPE (~567 x 224 mm), not square — the default
+    here is the product shape, not the drawn one. See the provenance block above."""
+    s = float(size_mm)
+    door = 25.0
+
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(_place(_rect_local(0.0, 0.0, s, s), x_mm, y_mm, rotation_deg))
+    await d.poly(_place(_rect_local(0.0, 0.0, s - 2 * door, s - 2 * door),
+                        x_mm, y_mm, rotation_deg))
+
+    # Lightning bolt as a fraction of the box, so it scales with size_mm.
+    # Local frame: x right, y up; the stroke runs from the lower-left corner
+    # region up to the upper-right, with the two mid-notches that make it read
+    # as a bolt rather than a plain zigzag. Kept inside the door rectangle.
+    u = s / 100.0
+    bolt = [(-24 * u, -24 * u), (-4 * u, 13 * u), (5 * u, 2 * u),
+            (10 * u, 10 * u), (15 * u, -2 * u), (24 * u, 24 * u)]
+    await d.poly(_place(bolt, x_mm, y_mm, rotation_deg), closed=False)
+    return d.result(footprint=[s, s])
+
+
 async def insert_locker_row(
     backend: AutoCADBackend, wall_side: str, offset_mm: float,
     cell_width_mm: float = 600.0, depth_mm: float = 420.0, count: int = 5,

@@ -613,6 +613,31 @@ async def polisnab(
       insert_locker_row — data: wall_side, offset_mm, cell_width_mm (=450),
                         depth_mm (=600), count (=5), label? Row of adjacent
                         locker cells + door-swing fan arcs along a wall on FURN.
+      insert_shower   — data: x_mm, y_mm, rotation_deg, size_mm (=1200).
+                        Corner shower on FURN: tray + upstand + corner drain +
+                        mixer circle on the -X wall. No door is drawn (dropped
+                        deliberately — so the symbol does not say which side you
+                        enter from, nor reserve the door's floor).
+                        1200x1200 is tagged on the reference (a stated size).
+                        Walls at local -X/-Y, so rotation_deg orients the corner
+                        for the plumbing (0 = walls west+south).
+      insert_nightstand — data: x_mm, y_mm, rotation_deg, width_mm (=450),
+                        depth_mm (=430). Plain outline rectangle on FURN;
+                        back at local -Y.
+      insert_convector — data: x_mm, y_mm, length_mm (=665), rotation_deg,
+                        depth_mm (=95). Long thin rectangle on FURN; length
+                        along local X, wall at local -Y. length_mm is
+                        parametric (panels are sized to the window above).
+      insert_split_system — data: x_mm, y_mm, length_mm (=475), rotation_deg,
+                        depth_mm (=142). Rounded-end "pill" on FURN; length
+                        along local X, wall at local -Y (place the centre
+                        depth_mm/2 off the inner face to sit flush).
+      insert_electrical_panel — data: x_mm, y_mm, rotation_deg, size_mm (=285).
+                        Square box + lightning-bolt glyph on FURN; wall at
+                        local -Y.
+    Sizes for the last four are typical-product ESTIMATES, not measured off the
+    reference and not GOST — see the provenance block in polisnab_standards.py
+    for the drawn pixel extents they disagree with. Override via the size args.
     """
     from autocad_mcp import polisnab_standards as ps
 
@@ -698,6 +723,33 @@ async def polisnab(
     elif operation == "insert_chair":
         result = await ps.insert_chair(
             backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+        )
+    elif operation == "insert_shower":
+        result = await ps.insert_shower(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+            size_mm=d.get("size_mm", 1200.0),
+        )
+    elif operation == "insert_nightstand":
+        result = await ps.insert_nightstand(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+            width_mm=d.get("width_mm", 450.0), depth_mm=d.get("depth_mm", 430.0),
+        )
+    elif operation == "insert_convector":
+        result = await ps.insert_convector(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0),
+            d.get("length_mm", 665.0), d.get("rotation_deg", 0.0),
+            depth_mm=d.get("depth_mm", 95.0),
+        )
+    elif operation == "insert_split_system":
+        result = await ps.insert_split_system(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0),
+            d.get("length_mm", 475.0), d.get("rotation_deg", 0.0),
+            depth_mm=d.get("depth_mm", 142.0),
+        )
+    elif operation == "insert_electrical_panel":
+        result = await ps.insert_electrical_panel(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+            size_mm=d.get("size_mm", 285.0),
         )
     elif operation == "insert_locker_row":
         result = await ps.insert_locker_row(

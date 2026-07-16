@@ -359,10 +359,11 @@ class FileIPCBackend(AutoCADBackend):
     async def create_circle(self, cx, cy, radius, layer=None) -> CommandResult:
         return await self._dispatch("create-circle", {"cx": cx, "cy": cy, "radius": radius, "layer": layer})
 
-    async def create_polyline(self, points, closed=False, layer=None) -> CommandResult:
+    async def create_polyline(self, points, closed=False, layer=None, linetype=None) -> CommandResult:
         pts_str = ";".join(f"{_fmt_coord(p[0])},{_fmt_coord(p[1])}" for p in points)
         return await self._dispatch("create-polyline", {
-            "points_str": pts_str, "closed": "1" if closed else "0", "layer": layer
+            "points_str": pts_str, "closed": "1" if closed else "0",
+            "layer": layer, "linetype": linetype,
         })
 
     async def create_rectangle(self, x1, y1, x2, y2, layer=None) -> CommandResult:
@@ -383,6 +384,16 @@ class FileIPCBackend(AutoCADBackend):
 
     async def create_hatch(self, entity_id, pattern="ANSI31") -> CommandResult:
         return await self._dispatch("create-hatch", {"entity_id": entity_id, "pattern": pattern})
+
+    async def create_solid(self, points, layer=None) -> CommandResult:
+        pts_str = ";".join(f"{_fmt_coord(p[0])},{_fmt_coord(p[1])}" for p in points)
+        return await self._dispatch("create-solid", {"points_str": pts_str, "layer": layer})
+
+    async def erase_window(self, x1, y1, x2, y2) -> CommandResult:
+        return await self._dispatch("erase-window", {
+            "x1": _round_coord(x1), "y1": _round_coord(y1),
+            "x2": _round_coord(x2), "y2": _round_coord(y2),
+        })
 
     async def entity_list(self, layer=None) -> CommandResult:
         return await self._dispatch("entity-list", {"layer": layer})

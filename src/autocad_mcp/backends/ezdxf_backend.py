@@ -70,6 +70,18 @@ class EzdxfBackend(AutoCADBackend):
         if layer and layer not in self._doc.layers:
             self._doc.layers.add(layer)
 
+    def _ensure_linetype(self, linetype: str | None):
+        """Define POLISNAB-DASH (model-scaled dashes) on demand; ignore others."""
+        if not linetype or linetype.upper() == "CONTINUOUS":
+            return
+        if linetype in self._doc.linetypes:
+            return
+        if linetype.upper() == "POLISNAB-DASH":
+            self._doc.linetypes.add(
+                "POLISNAB-DASH", pattern=[200.0, 120.0, -80.0],
+                description="Polisnab dashed __ __ __",
+            )
+
     # --- Drawing management ---
 
     async def drawing_info(self) -> CommandResult:
@@ -147,10 +159,14 @@ class EzdxfBackend(AutoCADBackend):
         e = self._msp.add_circle((cx, cy), radius, dxfattribs={"layer": layer or "0"})
         return CommandResult(ok=True, payload={"entity_type": "CIRCLE", "handle": e.dxf.handle})
 
-    async def create_polyline(self, points, closed=False, layer=None) -> CommandResult:
+    async def create_polyline(self, points, closed=False, layer=None, linetype=None) -> CommandResult:
         self._ensure_layer(layer)
+        self._ensure_linetype(linetype)
         pts = [(p[0], p[1]) for p in points]
-        e = self._msp.add_lwpolyline(pts, close=closed, dxfattribs={"layer": layer or "0"})
+        attribs = {"layer": layer or "0"}
+        if linetype and linetype.upper() != "CONTINUOUS" and linetype in self._doc.linetypes:
+            attribs["linetype"] = linetype
+        e = self._msp.add_lwpolyline(pts, close=closed, dxfattribs=attribs)
         return CommandResult(ok=True, payload={"entity_type": "LWPOLYLINE", "handle": e.dxf.handle})
 
     async def create_rectangle(self, x1, y1, x2, y2, layer=None) -> CommandResult:
@@ -347,8 +363,12 @@ class EzdxfBackend(AutoCADBackend):
             e = self._doc.entitydb.get(entity_id)
             if e is None:
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
-            hatch = self._msp.add_hatch()
-            hatch.set_pattern_fill(pattern, scale=1.0)
+            # Inherit the boundary entity's layer so the fill sits with its wall.
+            hatch = self._msp.add_hatch(dxfattribs={"layer": e.dxf.get("layer", "0")})
+            if str(pattern).upper() == "SOLID":
+                hatch.set_solid_fill(color=8)  # grey wall/insulation body
+            else:
+                hatch.set_pattern_fill(pattern, scale=1.0)
             # Try to use the entity as a boundary path
             hatch.paths.add_polyline_path(
                 [(p[0], p[1]) for p in e.get_points(format="xy")],
@@ -357,6 +377,47 @@ class EzdxfBackend(AutoCADBackend):
             return CommandResult(ok=True, payload={"entity_type": "HATCH", "handle": hatch.dxf.handle})
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
+
+    async def create_solid(self, points, layer=None) -> CommandResult:
+        self._ensure_layer(layer)
+        c = [(p[0], p[1]) for p in points[:4]]
+        if len(c) < 4:
+            return CommandResult(ok=False, error="create_solid needs 4 corners")
+        # SOLID fill order is a bowtie: CCW c0,c1,c2,c3 -> vtx 10,11,12,13 = c0,c1,c3,c2.
+        e = self._msp.add_solid(
+            [c[0], c[1], c[3], c[2]], dxfattribs={"layer": layer or "0"})
+        return CommandResult(ok=True, payload={"entity_type": "SOLID", "handle": e.dxf.handle})
+
+    async def erase_window(self, x1, y1, x2, y2) -> CommandResult:
+        lo_x, hi_x = min(x1, x2), max(x1, x2)
+        lo_y, hi_y = min(y1, y2), max(y1, y2)
+        wall_layers = {"AR-WALL", "AR-WALL-INSUL"}
+
+        def pts_of(e):
+            et = e.dxftype()
+            if et == "LINE":
+                return [(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]
+            if et == "LWPOLYLINE":
+                return [(p[0], p[1]) for p in e.get_points(format="xy")]
+            if et == "SOLID":
+                return [(e.dxf.get(a).x, e.dxf.get(a).y) for a in ("vtx0", "vtx1", "vtx2", "vtx3")]
+            return None
+
+        erased = 0
+        for e in list(self._msp):
+            if e.dxf.get("layer", "0") not in wall_layers:
+                continue
+            pts = pts_of(e)
+            if not pts:
+                continue
+            # Crossing test: any vertex inside, or the entity's bbox overlaps.
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            if max(xs) < lo_x or min(xs) > hi_x or max(ys) < lo_y or min(ys) > hi_y:
+                continue
+            self._msp.delete_entity(e)
+            erased += 1
+        return CommandResult(ok=True, payload={"erased": erased})
 
     # --- Layer operations ---
 

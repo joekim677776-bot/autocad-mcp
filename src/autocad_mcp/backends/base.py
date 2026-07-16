@@ -108,7 +108,7 @@ class AutoCADBackend(ABC):
     async def create_circle(self, cx: float, cy: float, radius: float, layer: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
-    async def create_polyline(self, points: list[list[float]], closed: bool = False, layer: str | None = None) -> CommandResult:
+    async def create_polyline(self, points: list[list[float]], closed: bool = False, layer: str | None = None, linetype: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def create_rectangle(self, x1: float, y1: float, x2: float, y2: float, layer: str | None = None) -> CommandResult:
@@ -124,6 +124,14 @@ class AutoCADBackend(ABC):
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def create_hatch(self, entity_id: str, pattern: str = "ANSI31") -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def create_solid(self, points: list[list[float]], layer: str | None = None) -> CommandResult:
+        """Filled quad (2D SOLID) from 4 corners in CCW order."""
+        return CommandResult(ok=False, error="Not supported on this backend")
+
+    async def erase_window(self, x1: float, y1: float, x2: float, y2: float) -> CommandResult:
+        """Erase wall entities (AR-WALL / AR-WALL-INSUL) crossing a rectangle."""
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def entity_list(self, layer: str | None = None) -> CommandResult:

@@ -569,22 +569,41 @@ async def polisnab(
                           geometric size multiplier, default 30).
 
     Parametric node generators (section 7) — geometry only, via `data`.
+      draw_module_outline — Module envelope as a REAL wall: outer + inner face
+                        polylines on AR-WALL with a SOLID grey fill between them
+                        on AR-WALL-INSUL (double-line + hatch, not a thin line).
+                        data: length_mm (=6000), width_mm (=2400) OUTER envelope;
+                        wall thickness from the insulation series
+                        (series "standard" 75 mm / "arctic" 150 mm) unless
+                        wall_thickness_mm overrides; origin=[x,y] (=0,0).
+                        Optional openings=[{wall_side, offset_mm, width_mm}, …]
+                        cut holes (both faces + fill + jambs) up front — the
+                        composable way to place several doors/windows at once.
+      insert_interior_wall — Interior partition between two arbitrary points in
+                        the same thick-wall style (SOLID band + two faces).
+                        data: start_point=[x,y], end_point=[x,y],
+                        thickness_mm (=75). Band is centred on the axis.
     Openings position against a module box (defaults 6000x2400 at origin;
     override with module_origin=[x,y], module_length, module_width,
     wall_thickness). wall_side is N/S/E/W; offset_mm runs left->right (S/N)
     or bottom->top (W/E). Furniture takes an absolute centre + rotation.
     Doors/windows accept an optional label (e.g. "D1"/"W1") placed as MTEXT
     on the TEXT layer just outside the opening.
-      insert_exterior_door — data: wall_side, offset_mm, width_mm (=1000),
-                        swing ("in"/"out"), label? Opening + leaf + swing arc on AR-DOOR.
-      insert_interior_door — data: wall_side, offset_mm, width_mm (=800),
-                        swing_direction ("in"/"out"), label? Same symbol on AR-DOOR.
-      insert_window   — data: wall_side, offset_mm, width_mm, label? Opening +
-                        double glazing line on AR-WIND.
+      insert_exterior_door — data: wall_side, offset_mm, width_mm (=950),
+                        swing ("in"/"out", default "out"), label? Cuts the thick
+                        wall (both faces + fill + jambs) + leaf + dashed swing arc.
+      insert_interior_door — data: wall_side, offset_mm, width_mm (=840),
+                        swing_direction ("in"/"out", default "in"), label? Same symbol.
+      insert_window   — data: wall_side, offset_mm, width_mm, label? Cuts the
+                        thick wall (both faces + fill + jambs) + double glazing
+                        line across the opening on AR-WIND (no swing/leaf).
       insert_bed      — data: x_mm, y_mm, rotation_deg, bed_type
                         ("single" 900x2000 / "double" 1400x2000) on FURN.
       insert_toilet   — data: x_mm, y_mm, rotation_deg. Cistern + bowl on FURN.
       insert_sink     — data: x_mm, y_mm, rotation_deg. Basin + tap on FURN.
+      insert_locker_row — data: wall_side, offset_mm, cell_width_mm (=450),
+                        depth_mm (=600), count (=5), label? Row of adjacent
+                        locker cells + door-swing fan arcs along a wall on FURN.
     """
     from autocad_mcp import polisnab_standards as ps
 
@@ -610,17 +629,30 @@ async def polisnab(
             company_name=d.get("company_name"),
             block_scale=d.get("block_scale"),
         )
+    elif operation == "draw_module_outline":
+        result = await ps.draw_module_outline(
+            backend,
+            length_mm=d.get("length_mm"), width_mm=d.get("width_mm"),
+            wall_thickness_mm=d.get("wall_thickness_mm"),
+            series=d.get("series"), origin=d.get("origin"),
+            openings=d.get("openings"),
+        )
+    elif operation == "insert_interior_wall":
+        result = await ps.insert_interior_wall(
+            backend, d.get("start_point"), d.get("end_point"),
+            d.get("thickness_mm", 75.0),
+        )
     elif operation == "insert_exterior_door":
         result = await ps.insert_exterior_door(
             backend, d.get("wall_side", "S"), d.get("offset_mm", 0),
-            d.get("width_mm", 1000.0), d.get("swing", "in"), label=d.get("label"),
+            d.get("width_mm", 950.0), d.get("swing", "out"), label=d.get("label"),
             module_origin=d.get("module_origin"), module_length=d.get("module_length"),
             module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
         )
     elif operation == "insert_interior_door":
         result = await ps.insert_interior_door(
             backend, d.get("wall_side", "S"), d.get("offset_mm", 0),
-            d.get("width_mm", 800.0), d.get("swing_direction", "in"), label=d.get("label"),
+            d.get("width_mm", 840.0), d.get("swing_direction", "in"), label=d.get("label"),
             module_origin=d.get("module_origin"), module_length=d.get("module_length"),
             module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
         )
@@ -643,6 +675,14 @@ async def polisnab(
     elif operation == "insert_sink":
         result = await ps.insert_sink(
             backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+        )
+    elif operation == "insert_locker_row":
+        result = await ps.insert_locker_row(
+            backend, d.get("wall_side", "W"), d.get("offset_mm", 0),
+            d.get("cell_width_mm", 450.0), d.get("depth_mm", 600.0),
+            d.get("count", 5), label=d.get("label"),
+            module_origin=d.get("module_origin"), module_length=d.get("module_length"),
+            module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
         )
     else:
         return _json({"error": f"Unknown polisnab operation: {operation}"})

@@ -14,6 +14,14 @@ The LISP dispatcher (`lisp-code/mcp_dispatch.lsp`) lives in the namespace of a
 - Changed **LISP** → reload the dispatcher (per above).
 - Changed **only Python** → just `/mcp reconnect`; do not touch LISP.
 
+**Параметризуй то, что будут подбирать на глаз.** `/mcp reconnect` требуется на
+*любую* правку Python, включая изменение одной константы, — а подбор
+визуальных величин (угол створки, длина панели, размер глифа) это всегда
+несколько итераций. Каждая итерация = правка + реконект + перевставка.
+Если величину явно будут крутить — выноси её в аргумент генератора сразу:
+тогда следующая примерка стоит одну вставку и ноль реконектов. Проверено на
+`door_open_deg`: переход 30°→50° обошёлся без единой правки кода.
+
 ## Known traps (rules, not history)
 - **FILEDIA guard.** Any LISP command that can pop a file dialog (e.g.
   `-LINETYPE _LOAD`) must be wrapped `(setvar "FILEDIA" 0) … (setvar "FILEDIA" 1)`.
@@ -43,6 +51,19 @@ database) + an explicit geometric intersection test, **never** `"_C"` / `"_W"`
 (crossing/window). `_C`/`_W` are evaluated against the *current view*, so the
 same call gives different results depending on zoom/pan — unstable and
 non-reproducible. This is why `erase-window` filters the full DB by rectangle.
+
+**`erase_window` НЕ универсальный ластик — он прибит к слоям стен.** Фильтр
+внутри `mcp-cmd-erase-window` жёстко ограничен `AR-WALL` + `AR-WALL-INSUL`
+(это сделано намеренно: чтобы прорезка проёма не съела мебель и текст рядом).
+Мебель, текст и прочее им стереть **невозможно** — вызов вернёт `ok:true` и
+сотрёт ноль объектов. Для мебели: `entity list <layer>` → `entity erase` по
+каждому хэндлу. Массовое стирание = по одному вызову на объект (43 объекта —
+43 вызова), другого пути через MCP нет.
+
+**Стирание объектов ≠ потеря логики.** Геометрия в DWG — это вывод
+генераторов, а не источник истины. Стёртую мебель всегда можно перегенерить
+повторным вызовом `insert_*`; теряются только параметры конкретных вызовов
+(какой offset был у локеров), не сам код. Не бояться чистить сцену.
 
 ## Screenshots / visual feedback
 - `get_screenshot` returns a **black frame** if the AutoCAD window is minimized,

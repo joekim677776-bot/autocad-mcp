@@ -306,6 +306,124 @@ def _oval_local(cx: float, cy: float, rx: float, ry: float, n: int = 32):
     ]
 
 
+def _rrect_local(cx: float, cy: float, w: float, h: float, r: float, n: int = 6):
+    """Rounded-rectangle outline centred on (cx, cy) in local space, sampled into
+    a closed polyline. ``r`` is clamped to half the shorter side."""
+    r = min(float(r), w / 2.0, h / 2.0)
+    ax, ay = w / 2.0 - r, h / 2.0 - r          # corner-arc centres, from the centre
+    out = []
+    # Corners CCW from bottom-right; each arc sweeps 90 deg.
+    for ox, oy, start in ((ax, -ay, 270.0), (ax, ay, 0.0), (-ax, ay, 90.0), (-ax, -ay, 180.0)):
+        for i in range(n + 1):
+            a = math.radians(start + 90.0 * i / n)
+            out.append((cx + ox + r * math.cos(a), cy + oy + r * math.sin(a)))
+    return out
+
+
+# Cabinet-front door glyph geometry — the "домик" (roof) icon solved for the
+# locker row and reused verbatim by the wardrobe: two leaves hinged at the two
+# ends of the open (room-facing) edge, swung into the room at different angles,
+# their tips meeting at the SAME along-wall level -> two separate lines, no
+# closed "V"/triangle and no crossing. No swing arc (deliberate: at cabinet
+# scale an arc reads as clutter, and the reference drawings omit it).
+LEAF_BOT_DEG, LEAF_TOP_DEG, LEAF_BOT_FRAC = 25.0, 15.0, 0.60
+CABINET_PANEL_DEPTH = 40.0     # back-panel strip inset from the wall -> double line
+
+
+async def _cabinet_cell(d, cell, cw: float, dp: float, layer: str = FURN_LAYER):
+    """Draw one cabinet cell + its door glyph through the caller's ``cell(lx, ly)``
+    mapping, which takes cell-local coordinates to world:
+
+      lx: 0 = wall-adjacent back face .. dp = open, room-facing front edge
+      ly: 0 .. cw along the wall
+
+    Shared by insert_locker_row (wall-anchored, lx/ly mapped through the wall's
+    offset/normal frame) and insert_wardrobe (free-placed, mapped through
+    _place). Keeping ONE implementation is the point: the leaf angles below were
+    tuned against the reference and must not drift apart between the two callers.
+    """
+    await d.poly([cell(0.0, 0.0), cell(0.0, cw), cell(dp, cw), cell(dp, 0.0)],
+                 closed=True, layer=layer)                  # cell outline (no fill)
+    # Second thin line by the wall face -> the double line (end plate).
+    pa, pb = cell(CABINET_PANEL_DEPTH, 0.0), cell(CABINET_PANEL_DEPTH, cw)
+    await d.line(pa[0], pa[1], pb[0], pb[1], layer)
+
+    b_ang, t_ang = math.radians(LEAF_BOT_DEG), math.radians(LEAF_TOP_DEG)
+    l1 = LEAF_BOT_FRAC * cw                 # lower leaf length
+    tip_ly = l1 * math.cos(b_ang)           # along-wall level shared by both tips
+    l2 = (cw - tip_ly) / math.cos(t_ang)    # upper leaf, shortened to that level
+    h_bot   = cell(dp, 0.0)                              # lower hinge (bottom of open edge)
+    h_top   = cell(dp, cw)                               # upper hinge (top of open edge)
+    tip_bot = cell(dp + l1 * math.sin(b_ang), tip_ly)    # lower leaf tip (deeper, 25 deg)
+    tip_top = cell(dp + l2 * math.sin(t_ang), tip_ly)    # upper leaf tip (shallower, 15 deg)
+    await d.line(h_bot[0], h_bot[1], tip_bot[0], tip_bot[1], layer)
+    await d.line(h_top[0], h_top[1], tip_top[0], tip_top[1], layer)
+
+
+# ---------------------------------------------------------------------------
+# Sanitary-ware silhouettes, measured pixel-by-pixel off the "Санузел" zone of
+# reference/reference-studio-module-layout.png rather than eyeballed. Each table
+# is (depth_fraction, half_width_fraction), where depth_fraction runs 0..1 from
+# the wall end of the bowl to its front tip, and half_width_fraction is relative
+# to the FULL fixture width. Straight from the reference rows:
+#   cistern spans x 1019..1059 (41 px) -> the full width;
+#   bowl    spans y  262..307  (45 px), widths 32 -> 30 -> 36 -> 0;
+#   seat    spans y  269..305  (36 px), widths  0 -> 29 -> 0.
+# The bowl deliberately starts at 0.390 (not 0): it meets the cistern along 78%
+# of the cistern's width, which is what stops it reading as two loose shapes.
+TOILET_BOWL_PROFILE = [
+    (0.000, 0.390), (0.089, 0.366), (0.200, 0.366), (0.289, 0.415),
+    (0.400, 0.439), (0.511, 0.439), (0.622, 0.427), (0.733, 0.390),
+    (0.844, 0.329), (0.911, 0.280), (0.956, 0.232),
+    # The reference's last rows (w 19 -> 17 -> closed within 2 px) are quantisation,
+    # not a cone: round the tip off rather than interpolating them straight to zero.
+    (0.980, 0.185), (0.993, 0.115), (1.000, 0.000),
+]
+TOILET_SEAT_PROFILE = [
+    (0.156, 0.000), (0.167, 0.150), (0.178, 0.220), (0.289, 0.305),
+    (0.400, 0.341), (0.511, 0.354), (0.622, 0.341), (0.733, 0.305),
+    (0.844, 0.220), (0.911, 0.134), (0.945, 0.075), (0.967, 0.000),
+]
+
+
+def _profile_at(profile, d: float) -> float:
+    """Linear-interpolate a (depth_fraction, half_width_fraction) table at ``d``."""
+    if d <= profile[0][0]:
+        return profile[0][1]
+    if d >= profile[-1][0]:
+        return profile[-1][1]
+    for (d0, w0), (d1, w1) in zip(profile, profile[1:]):
+        if d0 <= d <= d1:
+            t = 0.0 if d1 == d0 else (d - d0) / (d1 - d0)
+            return w0 + (w1 - w0) * t
+    return 0.0
+
+
+def _egg_local(cx: float, cy_top: float, width: float, depth: float, profile,
+               n: int = 48):
+    """Closed egg outline in local space, built from a measured ``profile``.
+
+    Grows downward (-Y) from ``cy_top`` for ``depth``; ``width`` is the reference
+    width the profile's half-widths are fractions of. Sampled down the right side
+    then back up the left, so a zero half-width at either end closes to a tip.
+    """
+    d_lo, d_hi = profile[0][0], profile[-1][0]
+    right, left = [], []
+    for i in range(n + 1):
+        d = d_lo + (d_hi - d_lo) * i / n
+        hw = _profile_at(profile, d) * width
+        y = cy_top - d * depth
+        right.append((cx + hw, y))
+        left.append((cx - hw, y))
+    pts = right + list(reversed(left))
+    # Drop consecutive duplicates (the tips, where both sides meet at hw == 0).
+    out = [pts[0]]
+    for p in pts[1:]:
+        if abs(p[0] - out[-1][0]) > 1e-6 or abs(p[1] - out[-1][1]) > 1e-6:
+            out.append(p)
+    return out
+
+
 def _arc_points(cx: float, cy: float, r: float, start_deg: float, end_deg: float, n: int = 18):
     """Sample a CCW arc from start_deg to end_deg (world space, open polyline)."""
     sweep = (end_deg - start_deg) % 360.0
@@ -675,37 +793,190 @@ async def insert_bed(
 async def insert_toilet(
     backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
 ) -> CommandResult:
-    """Toilet plan symbol on FURN: cistern (tank) + bowl, footprint ~370x650 mm,
-    centred on (x_mm, y_mm); the cistern is at the local +Y (wall) end."""
-    def place(pts):
-        return _place(pts, x_mm, y_mm, rotation_deg)
+    """Toilet plan symbol on FURN, matching the reference "Унитаз" pictogram: a
+    rounded-rectangle cistern with a flush button, and an egg-shaped bowl drawn as
+    a double outline (bowl + seat opening). 370x650 mm, centred on (x_mm, y_mm);
+    the cistern is at the local +Y (wall) end, so rotation_deg matches the wall the
+    toilet backs onto (0 = wall to the north).
 
-    d = _Draw(backend, FURN_LAYER)
-    await d.poly(place(_rect_local(0.0, 250.0, 370.0, 150.0)))     # cistern (y 175..325)
-    await d.poly(place(_oval_local(0.0, -75.0, 155.0, 250.0, 32)))  # bowl (y -325..175)
-    await d.poly(place(_oval_local(0.0, -75.0, 110.0, 190.0, 32)))  # seat opening
-    return d.result(footprint=[370.0, 650.0])
-
-
-async def insert_sink(
-    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
-) -> CommandResult:
-    """Sink plan symbol on FURN: basin outline + bowl + drain + tap, ~500x400 mm,
-    centred on (x_mm, y_mm); the tap sits at the local +Y (wall) end."""
+    The bowl silhouette comes from TOILET_BOWL_PROFILE / TOILET_SEAT_PROFILE, which
+    are measured off the reference. It meets the cistern along a real width — an
+    earlier version used a plain ellipse whose tip touched the cistern at a single
+    point, which read as two unrelated shapes rather than a toilet."""
     def place(pts):
         return _place(pts, x_mm, y_mm, rotation_deg)
 
     def pt(px, py):
         return _place([(px, py)], x_mm, y_mm, rotation_deg)[0]
 
+    width, cist_d = 370.0, 150.0                  # cistern spans y 175..325
+    bowl_top, bowl_d = 175.0, 500.0               # bowl spans y -325..175
+    cist_cy = bowl_top + cist_d / 2.0
+
     d = _Draw(backend, FURN_LAYER)
-    await d.poly(place(_rect_local(0.0, 0.0, 500.0, 400.0)))        # basin outline
-    await d.poly(place(_oval_local(0.0, -20.0, 190.0, 120.0, 32)))  # bowl
-    drain = pt(0.0, -20.0)
-    await d.circle(drain[0], drain[1], 18.0)                        # drain
-    tap = pt(0.0, 150.0)
-    await d.circle(tap[0], tap[1], 22.0)                            # tap
-    return d.result(footprint=[500.0, 400.0])
+    await d.poly(place(_rrect_local(0.0, cist_cy, width, cist_d, 35.0)))   # cistern
+    btn = pt(0.0, 325.0 - 0.46 * cist_d)          # flush button, 46% down the cistern
+    await d.circle(btn[0], btn[1], 18.0)
+    await d.poly(place(_egg_local(0.0, bowl_top, width, bowl_d, TOILET_BOWL_PROFILE)))
+    await d.poly(place(_egg_local(0.0, bowl_top, width, bowl_d, TOILET_SEAT_PROFILE)))
+    return d.result(footprint=[width, cist_d + bowl_d])
+
+
+async def insert_sink(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+) -> CommandResult:
+    """Sink plan symbol on FURN, matching the reference "Раковина" pictogram.
+    500 x 400 mm, centred on (x_mm, y_mm), wall at local +Y — so rotation_deg matches
+    the wall the sink hangs on.
+
+    The symbol is a BASE with everything seated inside it, not a free-floating bowl:
+
+        base   D-shaped carcass — flat back on the wall, straight sides, rounded
+               front. This is the 500 x 400 footprint.
+        bowl   oval, inset INSIDE the base: 70 mm from the wall but only 30 mm from
+               the front and 20 mm from the sides. That lopsided 70 mm strip at the
+               back is not slack — it is exactly what the tap occupies.
+        valve  triangle in that strip, base 20 mm off the wall and 50 mm deep, so its
+               apex lands precisely on the bowl's edge (20 + 50 = 70).
+        spout  bar reaching from the valve in over the drain.
+        drain  circle 180 mm off the wall — i.e. 40 mm off the bowl's centre toward
+               the wall, not centred.
+
+    Measured off the reference at 10 mm/px, the scale being fixed by the base itself
+    (40 x 50 px = 400 x 500 mm). Two earlier versions got this wrong: the first drew a
+    rectangular vanity with an inset oval; the second dropped the carcass altogether
+    and left the bowl and tap floating with nothing to sit on."""
+    def place(pts):
+        return _place(pts, x_mm, y_mm, rotation_deg)
+
+    def pt(px, py):
+        return _place([(px, py)], x_mm, y_mm, rotation_deg)[0]
+
+    w, dep = 500.0, 400.0
+    hw, wall = w / 2.0, dep / 2.0       # half-width; wall face at local +Y
+    side_to = wall - 240.0              # sides run straight this far, then the front curves
+    bowl_cy, bowl_rx, bowl_ry = -20.0, 230.0, 150.0
+    valve_off, valve_d, valve_hw = 20.0, 50.0, 25.0
+    spout_from, spout_to = 50.0, 120.0  # spout span, measured off the wall
+    drain_off, drain_r = 180.0, 25.0    # drain centre, off the wall
+
+    # Elliptical front, sampled left->right: hw across, and deep enough to reach the
+    # front face at y = -wall (NOT wall - side_to, which overshoots past the base).
+    front_ry = side_to + wall
+    front = []
+    for i in range(33):
+        a = math.pi + math.pi * i / 32
+        front.append((hw * math.cos(a), side_to + front_ry * math.sin(a)))
+
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(place([(-hw, wall), (-hw, side_to)] + front + [(hw, wall)]), closed=True)
+    await d.poly(place(_oval_local(0.0, bowl_cy, bowl_rx, bowl_ry, 48)))
+    drain = pt(0.0, wall - drain_off)
+    await d.circle(drain[0], drain[1], drain_r)
+    # Valve: apex on the bowl's edge, base toward the wall — seated inside the base.
+    v_base = wall - valve_off
+    await d.poly(place([(0.0, v_base - valve_d), (-valve_hw, v_base), (valve_hw, v_base)]),
+                 closed=True)
+    s0, s1 = pt(0.0, wall - spout_from), pt(0.0, wall - spout_to)
+    await d.line(s0[0], s0[1], s1[0], s1[1])
+    return d.result(footprint=[w, dep], bowl=[bowl_rx * 2, bowl_ry * 2])
+
+
+# ---------------------------------------------------------------------------
+# Sizes below are ESTIMATES scaled off reference/reference-studio-module-layout.png
+# (the "Стол"/"Шкаф"/"Ступ" objects), which carries no dimension tags for them.
+# That drawing is an ILLUSTRATIVE schematic, not a scaled plan: calibrating
+# against its own anchors gives inconsistent results (module 9000 mm -> 9.1 mm/px
+# across, 2500 mm -> 7.8 mm/px down; the "Душ 1200x1200" tile is drawn ~30%
+# under its stated size). The bed ("Кровать 1200x2000") is the most self-
+# consistent anchor and sits in the same zone as this furniture, so it sets the
+# scale here: 10.2 mm/px across, 8.8 mm/px down. Measured pixel extents ->
+#   Стол  124 x 51 px -> ~1260 x 450 mm   (module-scale cross-check: 1130 x 400)
+#   Шкаф   91 x 48 px -> ~ 920 x 420 mm   (cross-check:  830 x 370)
+#   Стул   54 x 52 px -> ~ 550 x 460 mm   (cross-check:  490 x 400)
+# The defaults round those to sane furniture sizes. They are a reasonable
+# reading of an illustrative drawing, NOT a normative standard — override via
+# the width/depth arguments where a real spec exists.
+# ---------------------------------------------------------------------------
+
+async def insert_table(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, width_mm: float = 1200.0, depth_mm: float = 500.0,
+) -> CommandResult:
+    """Table/desk plan symbol on FURN: a plain outline rectangle, exactly as the
+    reference draws it. ``width_mm`` runs along the wall, ``depth_mm`` into the
+    room; centred on (x_mm, y_mm) with the wall-facing edge at local -Y, so
+    rotation_deg matches the wall the desk backs onto (0 = wall to the south)."""
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(_place(_rect_local(0.0, 0.0, float(width_mm), float(depth_mm)),
+                        x_mm, y_mm, rotation_deg))
+    return d.result(footprint=[float(width_mm), float(depth_mm)])
+
+
+async def insert_wardrobe(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, width_mm: float = 900.0, depth_mm: float = 420.0,
+) -> CommandResult:
+    """Wardrobe plan symbol on FURN — a single free-placed cabinet cell drawn with
+    the SAME door glyph as insert_locker_row (see _cabinet_cell): body rectangle +
+    back-panel line + the two-leaf "домик" peak, no swing arc.
+
+    ``width_mm`` runs along the wall, ``depth_mm`` into the room; centred on
+    (x_mm, y_mm) with the back against local -Y and the doors opening toward
+    local +Y, so rotation_deg matches the wall it stands against (0 = wall to the
+    south, doors opening north)."""
+    cw, dp = float(width_mm), float(depth_mm)
+
+    # Cell frame -> centre-local -> world. lx runs from the back (-dp/2) forward;
+    # ly runs along the wall from the left edge (-cw/2).
+    def cell(lx, ly):
+        return _place([(-cw / 2.0 + ly, -dp / 2.0 + lx)], x_mm, y_mm, rotation_deg)[0]
+
+    d = _Draw(backend, FURN_LAYER)
+    await _cabinet_cell(d, cell, cw, dp)
+    return d.result(footprint=[cw, dp])
+
+
+async def insert_chair(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+) -> CommandResult:
+    """Chair plan symbol on FURN, matching the reference "Ступ" pictogram: a
+    rounded-square seat, a small armrest pad each side, and a curved backrest drawn as
+    a closed band (two concentric arcs joined at each end by a line running up to the
+    seat) behind it. 550x490 mm overall, centred on (x_mm, y_mm);
+    the chair FACES local +Y with the backrest at local -Y — so rotation_deg is
+    the direction the sitter looks (0 = facing north, toward a desk to the north)."""
+    def place(pts):
+        return _place(pts, x_mm, y_mm, rotation_deg)
+
+    seat_w, seat_d, seat_cy = 450.0, 380.0, 50.0    # seat spans y -140..+240
+    arm_w, arm_d, arm_cy = 50.0, 230.0, 30.0
+    back_r, back_t = 440.0, 60.0
+    back_from, back_to = 242.0, 298.0               # arc sweep, symmetric about 270
+    # Place the arc centre so the inner arc's endpoints land EXACTLY on the seat's rear
+    # edge — otherwise the band meets the seat with a hairline gap that shows up on
+    # zoom/OSNAP even though it is invisible at plot scale.
+    seat_rear = seat_cy - seat_d / 2.0
+    back_cy = seat_rear - back_r * math.sin(math.radians(back_from))
+
+    d = _Draw(backend, FURN_LAYER)
+    await d.poly(place(_rrect_local(0.0, seat_cy, seat_w, seat_d, 90.0)))   # seat
+    for sx in (-1.0, 1.0):                                                  # armrests
+        cx = sx * (seat_w / 2.0 + arm_w / 2.0)
+        await d.poly(place(_rrect_local(cx, arm_cy, arm_w, arm_d, 20.0)))
+    # Backrest: a CLOSED band bulging away from the seat (local -Y) — two concentric
+    # arcs joined at each end by a straight line, as the reference draws it (not two
+    # free-floating arcs). The band is centred behind the seat so the inner arc's
+    # endpoints land on the seat's rear edge (y = seat_cy - seat_d/2), which makes the
+    # two closing lines read as the backrest's uprights meeting the seat.
+    inner = _arc_points(0.0, back_cy, back_r, back_from, back_to, 24)
+    outer = _arc_points(0.0, back_cy, back_r + back_t, back_from, back_to, 24)
+    # inner left..right, then outer right..left; closing the loop draws the two
+    # end lines (inner_right->outer_right and outer_left->inner_left).
+    await d.poly(place(inner + list(reversed(outer))), closed=True)
+    width = seat_w + 2 * arm_w                      # armrests set the overall width
+    depth = (seat_cy + seat_d / 2.0) - (back_cy - (back_r + back_t))
+    return d.result(footprint=[round(width, 1), round(depth, 1)])
 
 
 async def insert_locker_row(
@@ -742,44 +1013,19 @@ async def insert_locker_row(
     def P(off, depth):
         return (sx + ux * off + nx * depth, sy + uy * off + ny * depth)
 
-    back = t             # inner wall face (cell back)
     front = t + dp       # cell front, into the room
-    panel_d = 40.0       # double-line: thin back-panel strip inset from the wall
     lbl_clear = cw * 0.4          # label stand-off in front of the row
 
     d = _Draw(backend, FURN_LAYER)
     for i in range(n):
         a = offset_mm + i * cw
-        b = a + cw
-        await d.poly([P(a, back), P(b, back), P(b, front), P(a, front)],
-                     closed=True, layer=FURN_LAYER)          # cell outline (no fill)
-        # Second thin line by the wall face -> the double line (end plate).
-        pa, pb = P(a, back + panel_d), P(b, back + panel_d)
-        await d.line(pa[0], pa[1], pb[0], pb[1], FURN_LAYER)
-        # Locker-door glyph: two leaves hinged at the two ends of the open (room-
-        # facing) edge, swung into the room at different angles. The lower leaf opens
-        # LEAF_BOT_DEG (longer); the upper leaf opens LEAF_TOP_DEG and is shortened so
-        # its tip sits at the SAME along-wall level as the lower tip -> two separate
-        # lines, no closed "V"/triangle and no crossing.
-        #
-        # Built in the cell's OWN local frame, then mapped to world through the SAME
-        # P() offset/normal transform that places the rectangle corners
-        # (P(a, back) == cell(lx=0, ly=0); P(b, front) == cell(lx=dp, ly=cw)):
-        #   local_x: 0 = wall-adjacent face, dp = open room-facing edge -> depth = t + lx
-        #   local_y: 0..cw along the wall                               -> off   = a  + ly
-        LEAF_BOT_DEG, LEAF_TOP_DEG, LEAF_BOT_FRAC = 25.0, 15.0, 0.60
-        def cell(lx, ly):
+        # Map the cell's own frame to world through the SAME P() offset/normal
+        # transform that places the wall geometry:
+        #   lx: 0 = wall-adjacent face, dp = open room-facing edge -> depth = t + lx
+        #   ly: 0..cw along the wall                               -> off   = a  + ly
+        def cell(lx, ly, a=a):
             return P(a + ly, t + lx)
-        b_ang, t_ang = math.radians(LEAF_BOT_DEG), math.radians(LEAF_TOP_DEG)
-        l1 = LEAF_BOT_FRAC * cw                 # lower leaf length
-        tip_ly = l1 * math.cos(b_ang)           # along-wall level shared by both tips
-        l2 = (cw - tip_ly) / math.cos(t_ang)    # upper leaf, shortened to that level
-        h_bot   = cell(dp, 0.0)                              # lower hinge (bottom of open edge)
-        h_top   = cell(dp, cw)                               # upper hinge (top of open edge)
-        tip_bot = cell(dp + l1 * math.sin(b_ang), tip_ly)    # lower leaf tip (deeper, 25 deg)
-        tip_top = cell(dp + l2 * math.sin(t_ang), tip_ly)    # upper leaf tip (shallower, 15 deg)
-        await d.line(h_bot[0], h_bot[1], tip_bot[0], tip_bot[1], FURN_LAYER)
-        await d.line(h_top[0], h_top[1], tip_top[0], tip_top[1], FURN_LAYER)
+        await _cabinet_cell(d, cell, cw, dp)
 
     if label:
         lbl_h = LABEL_HEIGHT / 2.0                           # 75 mm for the locker tag

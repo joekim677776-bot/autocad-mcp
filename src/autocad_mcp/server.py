@@ -601,6 +601,15 @@ async def polisnab(
                         ("single" 900x2000 / "double" 1400x2000) on FURN.
       insert_toilet   — data: x_mm, y_mm, rotation_deg. Cistern + bowl on FURN.
       insert_sink     — data: x_mm, y_mm, rotation_deg. Basin + tap on FURN.
+      insert_table    — data: x_mm, y_mm, rotation_deg, width_mm (=1200),
+                        depth_mm (=500). Plain outline rectangle on FURN;
+                        wall-facing edge at local -Y.
+      insert_wardrobe — data: x_mm, y_mm, rotation_deg, width_mm (=900),
+                        depth_mm (=420). Cabinet body + the same two-leaf
+                        "домик" door glyph as insert_locker_row, on FURN;
+                        back at local -Y, doors opening toward local +Y.
+      insert_chair    — data: x_mm, y_mm, rotation_deg. Seat + armrests +
+                        curved backrest band on FURN, ~550x500. Faces local +Y.
       insert_locker_row — data: wall_side, offset_mm, cell_width_mm (=450),
                         depth_mm (=600), count (=5), label? Row of adjacent
                         locker cells + door-swing fan arcs along a wall on FURN.
@@ -674,6 +683,20 @@ async def polisnab(
         )
     elif operation == "insert_sink":
         result = await ps.insert_sink(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+        )
+    elif operation == "insert_table":
+        result = await ps.insert_table(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+            width_mm=d.get("width_mm", 1200.0), depth_mm=d.get("depth_mm", 500.0),
+        )
+    elif operation == "insert_wardrobe":
+        result = await ps.insert_wardrobe(
+            backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
+            width_mm=d.get("width_mm", 900.0), depth_mm=d.get("depth_mm", 420.0),
+        )
+    elif operation == "insert_chair":
+        result = await ps.insert_chair(
             backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
         )
     elif operation == "insert_locker_row":

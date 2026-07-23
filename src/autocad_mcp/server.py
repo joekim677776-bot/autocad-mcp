@@ -598,7 +598,7 @@ async def polisnab(
                         thick wall (both faces + fill + jambs) + double glazing
                         line across the opening on AR-WIND (no swing/leaf).
       insert_bed      — data: x_mm, y_mm, rotation_deg, bed_type
-                        ("single" 900x2000 / "double" 1400x2000) on FURN.
+                        ("single" 900x2000 / "double" 1200x2000) on FURN.
       insert_toilet   — data: x_mm, y_mm, rotation_deg. Cistern + bowl on FURN.
       insert_sink     — data: x_mm, y_mm, rotation_deg. Basin + tap on FURN.
       insert_table    — data: x_mm, y_mm, rotation_deg, width_mm (=1200),

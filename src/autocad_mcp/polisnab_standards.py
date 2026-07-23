@@ -775,9 +775,9 @@ async def insert_bed(
     """Bed plan symbol on FURN, matching the reference pictogram: outer frame +
     an inset inner rectangle (the turned-down blanket) + pillow(s) at the head
     with diagonally-folded (chamfered) inner corners. 900x2000 (single) or
-    1400x2000 (double), centred on (x_mm, y_mm); the head sits at local +Y."""
+    1200x2000 (double), centred on (x_mm, y_mm); the head sits at local +Y."""
     double = str(bed_type).strip().lower() in ("double", "dbl", "2", "d")
-    w = 1400.0 if double else 900.0
+    w = 1200.0 if double else 900.0
     length = 2000.0
     half_len = length / 2.0
 
@@ -1552,16 +1552,21 @@ async def generate_studio_module(
           await insert_window(backend, "N", win_center - win_w / 2.0, win_w,
                               label="ОКНО", **modkw))
 
-    # 3) Double bed, head-to-NORTH (rot 0), NW corner. 1400 x 2000 (the
-    #    generator's double): X = cx +/- 700, Y = cy +/- 1000, head at +Y.
+    # 3) Double bed, head-to-NORTH (rot 0), NW corner. 1200 x 2000 (the
+    #    generator's double): X = cx +/- bed_hw, Y = cy +/- 1000, head at +Y.
+    #    bed_hw is derived from the real double width, NOT hardcoded — furniture
+    #    placed east of the bed hangs off this, so it must track insert_bed.
+    bed_w, bed_l = 1200.0, 2000.0
+    bed_hw = bed_w / 2.0
     bed_cx, bed_cy = ix0 + 850.0, iy1 - 1000.0
     c.add("insert_bed", await insert_bed(backend, bed_cx, bed_cy, 0.0, "double"))
 
     # Nightstand beside the HEAD (north end), east of the bed, back to the north
-    # wall — within reach of the pillow (not at the feet).
+    # wall — within reach of the pillow (not at the feet). 30 mm gap off the
+    # bed's east edge.
     ns_w, ns_d = 450.0, 430.0
     c.add("insert_nightstand",
-          await insert_nightstand(backend, bed_cx + 700.0 + 30.0 + ns_w / 2.0,
+          await insert_nightstand(backend, bed_cx + bed_hw + 30.0 + ns_w / 2.0,
                                   iy1 - ns_d / 2.0, 180.0, width_mm=ns_w, depth_mm=ns_d))
 
     # Convector under the window. NO split-system (removed at user request); its
@@ -1588,10 +1593,10 @@ async def generate_studio_module(
     c.add("insert_chair",
           await insert_chair(backend, dsk_cx - dsk_d / 2.0 - 240.0, dsk_cy, -90.0))
 
-    # Wardrobe on the south wall, east of the bed foot (which blocks x < bed_cx+700).
+    # Wardrobe on the south wall, east of the bed foot (which blocks x < bed_cx+bed_hw).
     wr_w, wr_d = 900.0, 420.0
     c.add("insert_wardrobe",
-          await insert_wardrobe(backend, bed_cx + 700.0 + 100.0 + wr_w / 2.0,
+          await insert_wardrobe(backend, bed_cx + bed_hw + 100.0 + wr_w / 2.0,
                                 iy0 + wr_d / 2.0, 0.0, width_mm=wr_w, depth_mm=wr_d))
 
     # Electrical panel on the south wall right beside the entrance (east jamb).

@@ -613,12 +613,14 @@ async def polisnab(
       insert_locker_row — data: wall_side, offset_mm, cell_width_mm (=450),
                         depth_mm (=600), count (=5), label? Row of adjacent
                         locker cells + door-swing fan arcs along a wall on FURN.
-      insert_shower   — data: x_mm, y_mm, rotation_deg, size_mm (=1200).
+      insert_shower   — data: x_mm, y_mm, rotation_deg, size_mm (=800).
                         Corner shower on FURN: tray + upstand + corner drain +
                         mixer circle on the -X wall. No door is drawn (dropped
                         deliberately — so the symbol does not say which side you
                         enter from, nor reserve the door's floor).
-                        1200x1200 is tagged on the reference (a stated size).
+                        size_mm accepts ONLY 800 (default) or 900 — the real
+                        standard trays; anything else is rejected. NOT 1200:
+                        that was a misread of a competitor's reference drawing.
                         Walls at local -X/-Y, so rotation_deg orients the corner
                         for the plumbing (0 = walls west+south).
       insert_nightstand — data: x_mm, y_mm, rotation_deg, width_mm (=450),
@@ -638,6 +640,27 @@ async def polisnab(
     Sizes for the last four are typical-product ESTIMATES, not measured off the
     reference and not GOST — see the provenance block in polisnab_standards.py
     for the drawn pixel extents they disagree with. Override via the size args.
+
+    Room templates (Phase 4) — one call builds a whole reference layout
+    (standards + shell + openings + furniture) on the ACTIVE (empty) drawing.
+      generate_dormitory_room — 4-bed dormitory of reference-4bed-room-layout.png:
+                        door (S) + window (E) + locker row (W) + bed pair(s) by
+                        the east wall, each capped at the feet by a partition.
+                        data: length_mm (=6000), width_mm (=2400),
+                        series (="arctic"), bed_pairs (=1). ONLY bed_pairs=1 is
+                        screenshot-verified; bed_pairs>1 tiles by analogy and is
+                        returned verified=False with a warning.
+      generate_studio_module — studio module of reference-studio-module-layout.png
+                        condensed into 6000x2400: door + window + double bed +
+                        nightstand + table + chair + wardrobe + shower + toilet +
+                        sink + convector + split-system + electrical panel.
+                        data: length_mm (=6000), width_mm (=2400),
+                        series (="arctic"). This is a NEW, not-yet-live-verified
+                        combination — always returned verified=False; confirm by
+                        screenshot before treating it as final.
+    Both return a payload with per-step ok/error, an `entities` total, a
+    `verified` flag and `warnings`. verified=false means the geometry has not
+    been eyeballed live yet — check the screenshot before trusting it.
     """
     from autocad_mcp import polisnab_standards as ps
 
@@ -727,7 +750,7 @@ async def polisnab(
     elif operation == "insert_shower":
         result = await ps.insert_shower(
             backend, d.get("x_mm", 0), d.get("y_mm", 0), d.get("rotation_deg", 0.0),
-            size_mm=d.get("size_mm", 1200.0),
+            size_mm=d.get("size_mm", 800.0),
         )
     elif operation == "insert_nightstand":
         result = await ps.insert_nightstand(
@@ -758,6 +781,18 @@ async def polisnab(
             d.get("count", 5), label=d.get("label"),
             module_origin=d.get("module_origin"), module_length=d.get("module_length"),
             module_width=d.get("module_width"), wall_thickness=d.get("wall_thickness"),
+        )
+    elif operation == "generate_dormitory_room":
+        result = await ps.generate_dormitory_room(
+            backend,
+            length_mm=d.get("length_mm", 6000.0), width_mm=d.get("width_mm", 2400.0),
+            series=d.get("series", "arctic"), bed_pairs=d.get("bed_pairs", 1),
+        )
+    elif operation == "generate_studio_module":
+        result = await ps.generate_studio_module(
+            backend,
+            length_mm=d.get("length_mm", 6000.0), width_mm=d.get("width_mm", 2400.0),
+            series=d.get("series", "arctic"),
         )
     else:
         return _json({"error": f"Unknown polisnab operation: {operation}"})

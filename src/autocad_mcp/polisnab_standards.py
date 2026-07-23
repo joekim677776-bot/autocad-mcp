@@ -580,6 +580,45 @@ async def _label_opening(d, label, p1, p2, nx, ny, *, height=LABEL_HEIGHT):
                   height=height, layer=TEXT_LAYER)
 
 
+async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
+    """Door leaf (thin filled rectangle) + 90 deg swing arc on AR-DOOR.
+
+    ``hinge`` is the hinge point; ``along_unit`` the unit vector along the wall
+    toward the far jamb (the leaf's closed direction); ``swing_dir`` the unit
+    vector the leaf opens toward. Shared by _draw_door (openings cut in the module
+    envelope) and _draw_door_symbol (doors in interior partitions)."""
+    ux, uy = along_unit
+    sx, sy = swing_dir
+    lt = DOOR_LEAF_THICKNESS
+    w = float(width)
+    A = (hinge[0], hinge[1])
+    B = (A[0] + ux * lt, A[1] + uy * lt)
+    C = (B[0] + sx * w, B[1] + sy * w)
+    D = (A[0] + sx * w, A[1] + sy * w)
+    await d.poly([A, B, C, D], closed=True, layer=AR_DOOR_LAYER)
+    # 90 deg swing arc: centre at hinge, radius = leaf width, from the open tip
+    # (along swing_dir) round to the closed position (along the wall, +along).
+    a_u = math.degrees(math.atan2(uy, ux)) % 360.0
+    a_s = math.degrees(math.atan2(sy, sx)) % 360.0
+    if abs(((a_u - a_s) % 360.0) - 90.0) < 1.0:
+        sa, ea = a_s, a_u
+    else:
+        sa, ea = a_u, a_s
+    await d.poly(_arc_points(hinge[0], hinge[1], w, sa, ea), closed=False,
+                 layer=AR_DOOR_LAYER, linetype=SWING_LINETYPE)
+
+
+async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
+    """Standalone door leaf + swing arc on AR-DOOR, hinged at ``hinge`` — for a
+    door in an INTERIOR partition (which is drawn as two insert_interior_wall
+    segments with the door opening as the gap between them; this only draws the
+    leaf/arc symbol into that gap). ``along_unit`` points toward the far jamb,
+    ``swing_dir`` is the side the leaf opens into."""
+    d = _Draw(backend, AR_DOOR_LAYER)
+    await _draw_door_leaf(d, hinge, along_unit, swing_dir, width_mm)
+    return d.result(hinge=[float(hinge[0]), float(hinge[1])], width=float(width_mm))
+
+
 async def _draw_door(
     backend, *, wall_side, offset_mm, width_mm, swing, layer, label=None,
     module_origin, module_length, module_width, wall_thickness,
@@ -622,24 +661,7 @@ async def _draw_door(
     inward = str(swing).strip().lower() in ("in", "inside", "internal", "i")
     sdir = (nx, ny) if inward else (-nx, -ny)
     hinge = P(a, t) if inward else P(a, 0.0)
-    lt = DOOR_LEAF_THICKNESS
-    # Thin rectangle: thickness lt along the wall (+u, toward the far jamb),
-    # length w along the swing direction.
-    A = hinge
-    B = (A[0] + ux * lt, A[1] + uy * lt)
-    C = (B[0] + sdir[0] * w, B[1] + sdir[1] * w)
-    D = (A[0] + sdir[0] * w, A[1] + sdir[1] * w)
-    await d.poly([A, B, C, D], closed=True, layer=AR_DOOR_LAYER)
-    # 90 deg swing arc: centre at hinge, radius = leaf width, from the open tip
-    # (along sdir) round to the closed position (along the wall, +u).
-    a_u = math.degrees(math.atan2(uy, ux)) % 360.0
-    a_l = math.degrees(math.atan2(sdir[1], sdir[0])) % 360.0
-    if abs(((a_u - a_l) % 360.0) - 90.0) < 1.0:
-        sa, ea = a_l, a_u
-    else:
-        sa, ea = a_u, a_l
-    await d.poly(_arc_points(hinge[0], hinge[1], w, sa, ea), closed=False,
-                 layer=AR_DOOR_LAYER, linetype=SWING_LINETYPE)
+    await _draw_door_leaf(d, hinge, (ux, uy), sdir, w)
 
     await _label_opening(d, label, p1, p2, nx, ny)
     return d.result(wall_side=str(wall_side), opening=[list(p1), list(p2)])
@@ -792,31 +814,38 @@ async def insert_bed(
 
 async def insert_toilet(
     backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    *, scale: float = 1.0,
 ) -> CommandResult:
     """Toilet plan symbol on FURN, matching the reference "Унитаз" pictogram: a
     rounded-rectangle cistern with a flush button, and an egg-shaped bowl drawn as
-    a double outline (bowl + seat opening). 370x650 mm, centred on (x_mm, y_mm);
-    the cistern is at the local +Y (wall) end, so rotation_deg matches the wall the
-    toilet backs onto (0 = wall to the north).
+    a double outline (bowl + seat opening). 370x650 mm at scale=1.0, centred on
+    (x_mm, y_mm); the cistern is at the local +Y (wall) end, so rotation_deg matches
+    the wall the toilet backs onto (0 = wall to the north).
+
+    ``scale`` shrinks/grows the WHOLE pictogram uniformly (every length ×scale) so
+    the look is preserved exactly, only the size changes; footprint becomes
+    370·scale × 650·scale. The back face then sits scale·325 mm off the centre, so a
+    wall-mounted placement must set the centre at inner_face + 325·scale.
 
     The bowl silhouette comes from TOILET_BOWL_PROFILE / TOILET_SEAT_PROFILE, which
     are measured off the reference. It meets the cistern along a real width — an
     earlier version used a plain ellipse whose tip touched the cistern at a single
     point, which read as two unrelated shapes rather than a toilet."""
+    s = float(scale)
     def place(pts):
         return _place(pts, x_mm, y_mm, rotation_deg)
 
     def pt(px, py):
         return _place([(px, py)], x_mm, y_mm, rotation_deg)[0]
 
-    width, cist_d = 370.0, 150.0                  # cistern spans y 175..325
-    bowl_top, bowl_d = 175.0, 500.0               # bowl spans y -325..175
+    width, cist_d = 370.0 * s, 150.0 * s          # cistern spans y 175..325 (×s)
+    bowl_top, bowl_d = 175.0 * s, 500.0 * s       # bowl spans y -325..175 (×s)
     cist_cy = bowl_top + cist_d / 2.0
 
     d = _Draw(backend, FURN_LAYER)
-    await d.poly(place(_rrect_local(0.0, cist_cy, width, cist_d, 35.0)))   # cistern
-    btn = pt(0.0, 325.0 - 0.46 * cist_d)          # flush button, 46% down the cistern
-    await d.circle(btn[0], btn[1], 18.0)
+    await d.poly(place(_rrect_local(0.0, cist_cy, width, cist_d, 35.0 * s)))   # cistern
+    btn = pt(0.0, bowl_top + 0.54 * cist_d)       # flush button, 46% down the cistern
+    await d.circle(btn[0], btn[1], 18.0 * s)
     await d.poly(place(_egg_local(0.0, bowl_top, width, bowl_d, TOILET_BOWL_PROFILE)))
     await d.poly(place(_egg_local(0.0, bowl_top, width, bowl_d, TOILET_SEAT_PROFILE)))
     return d.result(footprint=[width, cist_d + bowl_d])
@@ -984,14 +1013,20 @@ async def insert_chair(
 # ("Душ", "Тумба", "Конвектор", "Сплит-система", "Щит").
 #
 # SIZE PROVENANCE — read this before trusting the defaults.
-# Only the shower carries an explicit dimension tag on the reference
-# ("Душ 1200x1200"), so only IT is a stated size. The other four defaults are
-# typical-product sizes, NOT measurements of this drawing — the reference is an
-# illustrative schematic and disagrees with them. Measured against the bed
-# anchor ("Кровать 1200x2000" -> 9.95 mm/px across, 8.0 mm/px down; same anchor
-# and same caveats as the Стол/Шкаф/Стул block above), the drawn pixel extents
-# are:
-#   Душ         107 x  90 px -> ~1065 x  720 mm   (tagged 1200x1200 -> drawn ~30% under)
+# NONE of these defaults come from this reference, INCLUDING the shower. The
+# shower used to be the exception — it carries an explicit "Душ 1200x1200" tag,
+# which was taken as a stated size. It is not one: it is a competitor's drawing,
+# and the real Polisnab trays are 800 or 900 square. That tag was the single
+# most authoritative-looking number on the reference and it was still wrong, so
+# treat a tag here as the competitor's claim about their own product, never as a
+# spec for ours. insert_shower now accepts only 800/900 and rejects 1200.
+# The other four defaults are typical-product sizes, NOT measurements of this
+# drawing — the reference is an illustrative schematic and disagrees with them.
+# Measured against the bed anchor ("Кровать 1200x2000" -> 9.95 mm/px across,
+# 8.0 mm/px down; same anchor and same caveats as the Стол/Шкаф/Стул block
+# above), the drawn pixel extents are:
+#   Душ         107 x  90 px -> ~1065 x  720 mm   (tagged 1200x1200 — tag is the
+#                                                  competitor's, real = 800/900)
 #   Тумба        53 x  46 px -> ~ 527 x  368 mm   (default 450 x 430)
 #   Конвектор    91 x   8 px -> ~ 906 x   64 mm   (default 665 x  95, length parametric)
 #   Сплит         68 x   6 px -> ~ 677 x   48 mm   (default 475 x 142, length parametric)
@@ -1001,13 +1036,16 @@ async def insert_chair(
 # arguments wherever a real spec exists.
 # ---------------------------------------------------------------------------
 
+_SHOWER_SIZES_MM = (800.0, 900.0)
+
+
 async def insert_shower(
     backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
-    *, size_mm: float = 1200.0,
+    *, size_mm: float = 800.0,
 ) -> CommandResult:
     """Shower plan symbol on FURN — the reference's "Душ" pictogram:
 
-        tray   rounded outer square — the 1200 x 1200 footprint.
+        tray   rounded outer square — the size_mm x size_mm footprint.
         rim    second rounded square inset 70 mm: the tray's upstand. This is
                what separates a shower from a plain tiled square at plan scale.
         drain  two concentric circles (body + grate) in the wall corner, not a
@@ -1028,9 +1066,16 @@ async def insert_shower(
     walls, where the pipework is) and the mixer on the -X wall — point them at
     the real soil stack when placing.
 
-    1200 x 1200 mm — the ONE size on this reference that is explicitly tagged
-    ("Душ 1200x1200"), so it is a stated size, not an estimate. (The tray is
-    actually drawn ~30% under that tag; the tag wins.) Centred on (x_mm, y_mm)."""
+    size_mm: 800 или 900, реальные стандартные размеры, НЕ 1200 (это была
+    ошибочная оценка с референс-чертежа конкурента). Квадратный поддон, поэтому
+    size_mm задаёт обе стороны. Любое другое значение отвергается — это не
+    придирка к вводу, а единственное место, где зафиксировано, что 1200 больше
+    не вариант. Centred on (x_mm, y_mm)."""
+    if float(size_mm) not in _SHOWER_SIZES_MM:
+        return CommandResult(
+            ok=False,
+            error=f"insert_shower: size_mm must be 800 or 900, got {size_mm}",
+        )
     s = float(size_mm)
     h = s / 2.0
     rim = 70.0                          # upstand width, tray edge -> inner basin
@@ -1267,3 +1312,333 @@ async def insert_locker_row(
         await d.mtext(lp[0], lp[1], str(label), height=lbl_h, layer=TEXT_LAYER)
 
     return d.result(wall_side=str(wall_side), count=n, cell_width=cw, depth=dp)
+
+
+# ==========================================================================
+# Phase 4 — room templates. TWO SEPARATE composite generators, each reproducing
+# one reference layout end-to-end (standards + shell + openings + furniture) in
+# a single call. Deliberately NOT one shared function: the references are
+# different room types (dormitory vs studio) with different element sets and,
+# crucially, different confidence levels — folding them together would hide
+# which combinations have actually been seen live.
+#
+# CONFIDENCE — read before trusting the geometry these emit:
+#   generate_dormitory_room  is modelled on reference-4bed-room-layout.png. Only
+#     bed_pairs=1 is a confirmed, screenshot-verified arrangement. bed_pairs>1
+#     tiles further pairs westward BY ANALOGY and is returned verified=False +
+#     a warning — that multi-pair spacing has NOT been eyeballed live.
+#   generate_studio_module   packs every studio element (INCLUDING a double bed)
+#     into one 6000x2400 room. This exact combination has NOT been verified live
+#     — the double bed had only ever been drawn on its own, never alongside the
+#     санузел cluster + engineering symbols — so it is returned verified=False
+#     until a screenshot confirms it. Treat the first run as a first-time test.
+#
+# Both compose the existing node generators; they invent no new primitives. The
+# only fresh decisions are placement coordinates, kept as named locals below.
+# ==========================================================================
+
+
+class _Compose:
+    """Aggregate several sub-generator CommandResults into one summary result.
+
+    Mirrors _Draw's ok/error discipline at the orchestration level: the first
+    failing step's error wins and flips the whole call to ok=False, but every
+    step is still attempted and recorded so the caller can see how far it got.
+    """
+
+    def __init__(self):
+        self.steps: list[dict] = []
+        self.error: str | None = None
+        self.entities = 0
+
+    def add(self, name: str, r: CommandResult) -> CommandResult:
+        cnt = None
+        if isinstance(r.payload, dict):
+            cnt = r.payload.get("count")
+        self.steps.append({"step": name, "ok": r.ok, "error": r.error, "count": cnt})
+        if r.ok and isinstance(cnt, int):
+            self.entities += cnt
+        if not r.ok and self.error is None:
+            self.error = f"{name}: {r.error}"
+        return r
+
+    def result(self, **extra) -> CommandResult:
+        payload = {"steps": self.steps, "entities": self.entities}
+        payload.update(extra)
+        return CommandResult(ok=self.error is None, payload=payload, error=self.error)
+
+
+async def generate_dormitory_room(
+    backend: AutoCADBackend,
+    length_mm: float = 6000.0, width_mm: float = 2400.0,
+    series: str = "arctic", bed_pairs: int = 1,
+) -> CommandResult:
+    """4-bed dormitory (общежитие) module in one call — the layout of
+    reference-4bed-room-layout.png: standards + a real thick-wall shell, an
+    entrance door on the SOUTH wall, a window on the EAST wall, a row of lockers
+    on the WEST wall, and ``bed_pairs`` pair(s) of single beds by the EAST wall.
+
+    Geometry orientation (all in the module's own frame, origin at 0,0, inner
+    faces inset by the wall thickness ``t``):
+      * beds run head-to-EAST (toward the window wall), rotation_deg=-90 so the
+        pillow end (local +Y) points +X; a pair is a south + north bed sharing an
+        X range, kept apart by a clear GAP (``bed_gap_y``), NOT a partition — an
+        interior wall between beds reads as structural, and beds against a wall
+        only need air between them (feedback from the first live test);
+      * successive pairs (one behind another along the wall) are gap-separated
+        too (``pair_gap_x``), never touching;
+      * the locker row starts at the WEST wall's inner face and its cell width is
+        shrunk to the clear inner run so no cell is buried in the S/N walls
+        (offset 0 is the OUTER corner — a full-width run sinks 1/4 of the end
+        cells into the walls; also feedback from the first live test).
+
+    ``series`` picks the wall thickness (arctic 150 / standard 75). Door/window
+    are cut with insert_exterior_door / insert_window; they sit on DIFFERENT
+    walls so the two cuts compose cleanly (the same-side caveat in _draw_door
+    does not bite here).
+
+    VERIFIED: only bed_pairs=1 (its confirmed, screenshot-checked form). For
+    bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
+    flagged verified=False with a warning — that spacing has never been seen
+    live, so do not treat it as final without a screenshot.
+    """
+    L = float(length_mm)
+    W = float(width_mm)
+    t = _resolve_wall_thickness(series, None)
+    modkw = dict(module_origin=DEFAULT_MODULE["origin"],
+                 module_length=L, module_width=W, wall_thickness=t)
+    ix0, iy0, ix1, iy1 = t, t, L - t, W - t         # inner faces (origin 0,0)
+    c = _Compose()
+
+    # 1) Standards + thick-wall shell.
+    c.add("setup_layers", await setup_layers(backend))
+    c.add("setup_dimstyle", await setup_dimstyle(backend))
+    c.add("draw_module_outline",
+          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series))
+
+    # 2) Entrance (S) + window (E) — different walls, so the cuts compose.
+    door_w = 950.0
+    door_off = max(0.0, min(1500.0, L / 2.0 - door_w / 2.0))
+    c.add("insert_exterior_door",
+          await insert_exterior_door(backend, "S", door_off, door_w, "out",
+                                     label="ВХОД", **modkw))
+    win_w = min(1120.0, W - 2 * t - 200.0)
+    win_off = (W - win_w) / 2.0
+    c.add("insert_window",
+          await insert_window(backend, "E", win_off, win_w, label="ОКНО", **modkw))
+
+    # 3) Locker row on the west wall. The row must sit BETWEEN the inner faces of
+    #    the S/N walls. offset 0 is the OUTER corner, so a full-width run (count *
+    #    cw == outer length) buries a quarter of the two END cells in the walls
+    #    (150 mm of a 600 mm cell = 1/4). Start at the inner face and shrink the
+    #    cell width to the clear inner run if the requested width would overflow.
+    lock_count, lock_cw_req, lock_depth = 4, 600.0, 420.0
+    inner_run = W - 2 * t                                   # clear west-wall length
+    lock_cw = min(lock_cw_req, inner_run / lock_count)
+    lock_off = t + (inner_run - lock_count * lock_cw) / 2.0
+    c.add("insert_locker_row",
+          await insert_locker_row(backend, "W", lock_off, lock_cw, lock_depth,
+                                  lock_count, label="ЛОКЕРЫ", **modkw))
+
+    # 4) Bed pair(s) by the east wall — head-to-east (rot -90). A pair is a
+    #    south + north bed sharing an X range, kept apart by a clear GAP, not a
+    #    partition: an interior wall between beds reads as structural, and beds
+    #    against a wall only need air between them. Successive pairs (one behind
+    #    another along the wall) are likewise gap-separated, never touching.
+    bed_len, bed_w = 2000.0, 900.0
+    head_clear = 50.0            # bed head off the east (window) wall
+    bed_gap_y = 200.0           # clear gap between the S and N bed of a pair
+    pair_gap_x = 400.0          # clear gap between successive pairs
+    inner_h = W - 2 * t
+    y_margin = max(0.0, (inner_h - (2 * bed_w + bed_gap_y)) / 2.0)
+    sy = iy0 + y_margin + bed_w / 2.0        # south bed centre
+    ny = iy1 - y_margin - bed_w / 2.0        # north bed centre
+    n_req = max(1, int(bed_pairs))
+    placed = 0
+    warnings: list[str] = []
+    for k in range(n_req):
+        head_x = ix1 - head_clear - k * (bed_len + pair_gap_x)
+        foot_x = head_x - bed_len
+        if foot_x < ix0 + 300.0:             # would run into the lockers / west wall
+            warnings.append(
+                f"bed_pair {k + 1} omitted: no floor left (foot_x={foot_x:.0f} mm).")
+            break
+        cx = head_x - bed_len / 2.0
+        c.add(f"insert_bed[{k + 1}S]", await insert_bed(backend, cx, sy, -90.0, "single"))
+        c.add(f"insert_bed[{k + 1}N]", await insert_bed(backend, cx, ny, -90.0, "single"))
+        placed += 1
+
+    verified = (n_req == 1)
+    if n_req > 1:
+        warnings.append(
+            "bed_pairs>1 is NOT screenshot-verified — only bed_pairs=1 is a "
+            "confirmed live layout. The extra pairs are tiled by analogy; treat "
+            "them as a draft that needs its own visual test.")
+
+    return c.result(series=str(series).strip().lower(), module=[L, W],
+                    wall_thickness=t, bed_pairs_placed=placed,
+                    verified=verified, warnings=warnings)
+
+
+async def generate_studio_module(
+    backend: AutoCADBackend,
+    length_mm: float = 6000.0, width_mm: float = 2400.0, series: str = "arctic",
+) -> CommandResult:
+    """Studio module (студия-модуль) in one call — the element set of
+    reference-studio-module-layout.png condensed into one 6000x2400 room:
+    standards + shell + entrance door + window, a DOUBLE bed with a nightstand,
+    a work zone (table + chair + wardrobe), an ENCLOSED санузел (shower + toilet
+    + sink behind a real door), and the engineering symbols (convector under the
+    window, split-system, electrical panel by the entrance).
+
+    The reference is a 9000x2500 drawing with a separate тамбур/гардероб; that
+    does not fit 6000x2400, so this reproduces the STYLE and the fixture set, not
+    the exact partitioning. Layout (module frame, inner faces inset by ``t``) —
+    reworked after the first live studio review:
+      * санузел: a COMPACT east room (1100 mm) shut off by a FULL-height N-S
+        partition with a real interior DOOR — a proper wet room. The door is a
+        NARROW 400 mm leaf that swings WEST, into the living-room corridor (never
+        into the tiny wet room), placed near the south end so its swing clears the
+        corner desk. Shower in the NE corner (rot 180 -> drain in the +X/+Y
+        corner); sink on the east wall directly BELOW the shower (rot -90, backs
+        east) — pulled up against it; toilet on the SOUTH wall (rot 180, backs
+        south), east half under the shower and off the east wall / out of the
+        doorway;
+      * bed: double, head-to-NORTH (rot 0), NW corner;
+      * nightstand: beside the HEAD (north end, east side, back to the north
+        wall) so it is within arm's reach of the pillow — NOT at the feet;
+      * window: north wall over the living zone; convector directly under it
+        (no split-system — removed; its corner now holds the desk);
+      * desk: VERTICAL (rot 90), tucked into the NE corner of the living area
+        against the санузел partition and the north wall; chair pulled up on its
+        west side (rot -90, facing the desk);
+      * wardrobe: south wall, clear of the bed foot;
+      * entrance door: south wall, swinging out;
+      * electrical panel: south wall right beside the entrance door — by the
+        вход, never inside the санузел.
+
+    NOT VERIFIED LIVE by default — this packed combination is returned
+    verified=False; confirm by screenshot before treating it as final.
+
+    All wall-mounted devices are placed depth/2 off the inner face with the back
+    turned to their wall, per the пристенные-элементы rule in CLAUDE.md.
+    """
+    L = float(length_mm)
+    W = float(width_mm)
+    t = _resolve_wall_thickness(series, None)
+    modkw = dict(module_origin=DEFAULT_MODULE["origin"],
+                 module_length=L, module_width=W, wall_thickness=t)
+    ix0, iy0, ix1, iy1 = t, t, L - t, W - t
+    c = _Compose()
+
+    # 1) Standards + thick-wall shell.
+    c.add("setup_layers", await setup_layers(backend))
+    c.add("setup_dimstyle", await setup_dimstyle(backend))
+    c.add("draw_module_outline",
+          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series))
+
+    # Zone X-bands: living/bedroom (west, larger) | санузел (east, compact 1100).
+    san_x = ix1 - 1100.0                      # санузел partition line
+
+    # 2) Entrance (S) + window (N, over the living zone). Different walls -> the
+    #    envelope cuts compose.
+    door_w = 950.0
+    door_center = ix0 + 3100.0
+    c.add("insert_exterior_door",
+          await insert_exterior_door(backend, "S", door_center - door_w / 2.0,
+                                     door_w, "out", label="ВХОД", **modkw))
+    win_w, win_center = 1120.0, ix0 + 3050.0
+    c.add("insert_window",
+          await insert_window(backend, "N", win_center - win_w / 2.0, win_w,
+                              label="ОКНО", **modkw))
+
+    # 3) Double bed, head-to-NORTH (rot 0), NW corner. 1400 x 2000 (the
+    #    generator's double): X = cx +/- 700, Y = cy +/- 1000, head at +Y.
+    bed_cx, bed_cy = ix0 + 850.0, iy1 - 1000.0
+    c.add("insert_bed", await insert_bed(backend, bed_cx, bed_cy, 0.0, "double"))
+
+    # Nightstand beside the HEAD (north end), east of the bed, back to the north
+    # wall — within reach of the pillow (not at the feet).
+    ns_w, ns_d = 450.0, 430.0
+    c.add("insert_nightstand",
+          await insert_nightstand(backend, bed_cx + 700.0 + 30.0 + ns_w / 2.0,
+                                  iy1 - ns_d / 2.0, 180.0, width_mm=ns_w, depth_mm=ns_d))
+
+    # Convector under the window. NO split-system (removed at user request); its
+    # NE corner now holds the work desk — see below.
+    conv_d = 95.0
+    c.add("insert_convector",
+          await insert_convector(backend, win_center, iy1 - conv_d / 2.0,
+                                 1000.0, 180.0, depth_mm=conv_d))
+
+    # 4) Work zone: a VERTICAL desk tucked into the NE corner of the living area
+    #    (north wall + санузел partition) — the corner the split-system vacated.
+    #    rot 90 turns the desk so width_mm runs N-S along the partition; its back
+    #    sits on the partition's west face and its top edge on the north wall, so
+    #    it "fits the corner" exactly. Chair pulled up on its west side.
+    part_t = 100.0                            # санузел partition thickness (below)
+    dsk_w, dsk_d = 1000.0, 550.0              # width runs N-S, depth into the room
+    dsk_cx = (san_x - part_t / 2.0) - dsk_d / 2.0   # back on the partition west face
+    dsk_cy = iy1 - dsk_w / 2.0                       # top edge on the north wall
+    c.add("insert_table",
+          await insert_table(backend, dsk_cx, dsk_cy, 90.0,
+                             width_mm=dsk_w, depth_mm=dsk_d))
+    # Chair faces EAST (rot -90) into the desk; front edge (local +240) just meets
+    # the desk's west face.
+    c.add("insert_chair",
+          await insert_chair(backend, dsk_cx - dsk_d / 2.0 - 240.0, dsk_cy, -90.0))
+
+    # Wardrobe on the south wall, east of the bed foot (which blocks x < bed_cx+700).
+    wr_w, wr_d = 900.0, 420.0
+    c.add("insert_wardrobe",
+          await insert_wardrobe(backend, bed_cx + 700.0 + 100.0 + wr_w / 2.0,
+                                iy0 + wr_d / 2.0, 0.0, width_mm=wr_w, depth_mm=wr_d))
+
+    # Electrical panel on the south wall right beside the entrance (east jamb).
+    ep = 285.0
+    c.add("insert_electrical_panel",
+          await insert_electrical_panel(backend, door_center + door_w / 2.0 + 40.0 + ep / 2.0,
+                                        iy0 + ep / 2.0, 0.0, size_mm=ep))
+
+    # 5) Санузел: FULL-height partition drawn as two segments with a door gap,
+    #    plus the door leaf/arc. The opening is a NARROW 400 mm (half the earlier
+    #    800) and the leaf swings WEST — into the living-room corridor, not into
+    #    the tiny wet room. Placed near the south end so its swing clears the
+    #    corner desk (which sits at y >= dsk top, well north of here).
+    door_w_san = 400.0
+    door_lo = iy0 + 250.0
+    door_hi = door_lo + door_w_san                   # 400 mm opening
+    c.add("insert_interior_wall[san_S]",
+          await insert_interior_wall(backend, (san_x, iy0), (san_x, door_lo), part_t))
+    c.add("insert_interior_wall[san_N]",
+          await insert_interior_wall(backend, (san_x, door_hi), (san_x, iy1), part_t))
+    c.add("санузел_door",
+          await _draw_door_symbol(backend, (san_x, door_lo), (0.0, 1.0), (-1.0, 0.0),
+                                  door_w_san))
+
+    sh = 900.0
+    c.add("insert_shower",
+          await insert_shower(backend, ix1 - sh / 2.0, iy1 - sh / 2.0, 180.0, size_mm=sh))
+    # Sink (500 x 400) on the east wall below the shower (rot -90, backs east),
+    # with a CLEAR GAP to the shower tray (sink_gap) — the two must not touch.
+    sink_d, sink_len = 400.0, 500.0
+    sink_gap = 150.0                          # gap between sink top and shower tray
+    c.add("insert_sink",
+          await insert_sink(backend, ix1 - sink_d / 2.0,
+                            (iy1 - sh) - sink_gap - sink_len / 2.0, -90.0))
+    # Toilet on the SOUTH wall (rot 180, backs south), a touch smaller than the
+    # 370x650 default. Nudged WEST of the sink's x-band so the sink can drop down
+    # for its gap without clashing — still under the shower and off the east wall /
+    # clear of the door. toi_d follows the scale so the back stays on the wall.
+    toi_scale = 0.85
+    toi_d = 650.0 * toi_scale
+    c.add("insert_toilet",
+          await insert_toilet(backend, san_x + 450.0, iy0 + toi_d / 2.0, 180.0,
+                              scale=toi_scale))
+
+    return c.result(series=str(series).strip().lower(), module=[L, W],
+                    wall_thickness=t, verified=False,
+                    warnings=["Studio layout is a packed, verified=False-by-design "
+                              "combination (double bed + enclosed санузел + "
+                              "engineering symbols in one 6000x2400 scene). Confirm "
+                              "by screenshot before treating it as final."])

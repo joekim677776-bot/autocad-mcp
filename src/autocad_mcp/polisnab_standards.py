@@ -308,6 +308,23 @@ def _free_runs(lo, hi, band_lo, band_hi, obstacles, axis):
     return _subtract_gaps(lo, hi, taken)
 
 
+def _resolve_bed_axis(flag, ix0, iy0, ix1, iy1):
+    """Resolve ``bed_axis`` to "x" or "y" — the world axis beds are laid
+    head-to-toe along, and therefore the axis the two bed rows run parallel to.
+
+    "auto" picks the room's LONG axis, because that is what the arrangement has
+    always assumed: beds lie along the long walls with the aisle between them.
+    The derivation is deliberately reported back in the payload rather than left
+    implicit — a caller that swaps length_mm and width_mm expecting the layout to
+    follow deserves to see whether it did."""
+    key = str(flag).strip().lower()
+    if key in ("x", "y"):
+        return key
+    if key in ("auto", "none", ""):
+        return "x" if (ix1 - ix0) >= (iy1 - iy0) else "y"
+    raise ValueError(f"bed_axis={flag!r}: use 'auto', 'x' or 'y'")
+
+
 def _wall_band_aabb(side, ox, oy, L, W, t):
     """World AABB of one wall band of a module envelope, at its FULL outer extent
     (corners included — the neighbouring sides overlap it there, which is what a
@@ -2242,7 +2259,7 @@ async def generate_dormitory_room(
     door_wall: str = "W", door_swing: str = "out", door_offset_mm=None,
     window_wall: str = "E", window_offset_mm=None,
     wall_west=True, wall_east=True, party_wall_thickness_mm=None,
-    room_number=None,
+    room_number=None, bed_axis: str = "auto",
 ) -> CommandResult:
     """4-bed dormitory (общежитие) module in one call. Wall layout (reworked
     2026-07-24): standards + a real thick-wall shell, an entrance door on the
@@ -2440,11 +2457,23 @@ async def generate_dormitory_room(
     #    on a room whose west boundary is the neighbour's wall (side_t["W"] == 0)
     #    the inner face IS the outer corner, and an offset of t would leave a
     #    150 mm dead strip beside the lockers.
+    #    Which two walls those are is not fixed any more: they are the walls the
+    #    beds back onto, i.e. the ones parallel to `bed_axis`. On the historical
+    #    wide room that is S and N at their west end — byte-identical to before.
+    bed_axis = _resolve_bed_axis(bed_axis, ix0, iy0, ix1, iy1)
+    if bed_axis == "x":
+        row_walls, lock_end, lock_off = ("S", "N"), "W", side_t["W"]
+        bed_rot, axis = -90.0, 0
+        a_lo, a_hi, c_lo, c_hi = ix0, ix1, iy0, iy1
+    else:
+        row_walls, lock_end, lock_off = ("W", "E"), "S", side_t["S"]
+        bed_rot, axis = 0.0, 1
+        a_lo, a_hi, c_lo, c_hi = iy0, iy1, ix0, ix1
+
     lock_cw, lock_depth, lock_n = 600.0, 420.0, 2
     lockkw = {k: v for k, v in modkw.items() if k != "side_thickness"}
-    lock_off = side_t["W"]
-    for wall in ("S", "N"):
-        c.add(f"insert_locker_row[{wall}W]",
+    for wall in row_walls:
+        c.add(f"insert_locker_row[{wall}{lock_end}]",
               await insert_locker_row(backend, wall, lock_off, lock_cw, lock_depth,
                                       lock_n, label="ЛОКЕРЫ", **lockkw))
 
@@ -2469,21 +2498,22 @@ async def generate_dormitory_room(
     # lockers already followed ("its frontage is taken"), applied to the beds.
     n_req = max(1, int(bed_pairs))
     warnings: list[str] = []
-    rows = ((iy0 + bed_w / 2.0, "S"), (iy1 - bed_w / 2.0, "N"))
+    rows = ((c_lo + bed_w / 2.0, row_walls[0]), (c_hi - bed_w / 2.0, row_walls[1]))
     per_row = []
     for centre, tag in rows:
         band_lo, band_hi = centre - bed_w / 2.0, centre + bed_w / 2.0
         obstacles = ([(n, b) for n, b in c.boxes if n != "draw_module_outline"]
                      + list(c.swings))
         n_here = 0
-        for run_lo, run_hi in reversed(_free_runs(ix0, ix1, band_lo, band_hi,
-                                                  obstacles, 0)):
+        for run_lo, run_hi in reversed(_free_runs(a_lo, a_hi, band_lo, band_hi,
+                                                  obstacles, axis)):
             head = run_hi - head_clear
             while n_here < n_req and head - bed_len >= run_lo - 1e-6:
                 foot = head - bed_len
                 mid = (head + foot) / 2.0
+                bx, by = (mid, centre) if axis == 0 else (centre, mid)
                 c.add(f"insert_bed[{n_here + 1}{tag}]",
-                      await insert_bed(backend, mid, centre, -90.0, "single"))
+                      await insert_bed(backend, bx, by, bed_rot, "single"))
                 n_here += 1
                 head = foot - pair_gap_x
             if n_here >= n_req:
@@ -2550,6 +2580,7 @@ async def generate_dormitory_room(
                     wall_thickness=t, side_thickness=side_t,
                     inner=[ix0, iy0, ix1, iy1], bed_pairs_placed=placed,
                     beds_placed=beds_got, beds_requested=beds_req,
+                    bed_axis=bed_axis,
                     verified=verified, warnings=warnings)
 
 

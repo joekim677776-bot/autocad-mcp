@@ -683,6 +683,13 @@ async def polisnab(
     stay fixed on S/N because that layout is asymmetric and would need mirroring,
     not a flag.
 
+    generate_dormitory_room takes bed_axis ("auto" | "x" | "y"): the world axis
+    beds are laid head-to-toe along, and so the axis the two bed rows run
+    parallel to. "auto" picks the module's long side and reports the resolved
+    value back in the payload. Swapping length_mm/width_mm alone is NOT enough
+    to turn the room - it moves the shell but the furniture frame follows
+    bed_axis, and the resolved value is what tells you which way it went.
+
     Both composites take room_number (optional, e.g. "101"), drawn at the centre
     of the room's clear interior and checked as annotation like every other tag.
     It is never derived — only the caller assembling the building knows it.
@@ -833,6 +840,7 @@ async def polisnab(
             wall_west=d.get("wall_west", True), wall_east=d.get("wall_east", True),
             party_wall_thickness_mm=d.get("party_wall_thickness_mm"),
             room_number=d.get("room_number"),
+            bed_axis=d.get("bed_axis", "auto"),
         )
     elif operation == "insert_corridor":
         result = await ps.insert_corridor(

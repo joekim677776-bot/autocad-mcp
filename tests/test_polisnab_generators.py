@@ -1073,10 +1073,11 @@ class TestCompleteness:
     """
 
     async def test_shortfall_forces_verified_false(self, backend):
-        # The exact configuration from the diagnostic: swapped proportions, so
-        # no bed fits at all. It used to come back verified=True with zero beds.
+        # The exact configuration from the diagnostic: swapped proportions with
+        # the furniture frame still on X, so no bed fits at all. It used to come
+        # back verified=True with zero beds.
         r = await ps.generate_dormitory_room(
-            backend, 2400.0, 6000.0, "arctic", bed_pairs=2)
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, bed_axis="x")
         assert r.ok
         assert r.payload["beds_placed"] == 0
         assert r.payload["verified"] is False
@@ -1146,6 +1147,65 @@ class TestFourBedsOnACorridor:
         assert boxes["insert_bed[1N]"] == pytest.approx([3800.0, 1425.0, 5800.0, 2250.0])
         assert boxes["insert_bed[2N]"] == pytest.approx([1400.0, 1425.0, 3400.0, 2250.0])
         assert r.payload["verified"] is True
+
+
+class TestBedAxis:
+    """Phase 4b (2026-07-28): the 90-degree turn for a 2400-facade room."""
+
+    async def test_auto_follows_the_long_side(self, backend):
+        wide = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 1)
+        deep = await ps.generate_dormitory_room(backend, 2400.0, 6000.0, "arctic", 1)
+        assert wide.payload["bed_axis"] == "x"
+        assert deep.payload["bed_axis"] == "y"
+
+    async def test_rotated_room_gets_all_four_beds(self, backend):
+        # The point of the exercise: 4 places, a corridor door on the 2400
+        # facade, and BOTH check families clean - not merely "does not crash".
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        assert r.ok
+        assert r.payload["bed_axis"] == "y"
+        assert r.payload["beds_placed"] == 4
+        assert r.payload["verified"] is True, r.payload["warnings"]
+        assert r.payload["warnings"] == []
+
+    async def test_rotated_geometry_matches_the_arithmetic(self, backend):
+        # 2400 facade = 825 + 450 aisle + 825; 6000 depth = 1200 lockers + 50 +
+        # 2000 + 400 + 2000 + 50. Asserted so the numbers in the docs stay true.
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        b = {n: box for n, *box in r.payload["boxes"]}
+        west, east = b["insert_bed[1W]"], b["insert_bed[1E]"]
+        assert west[0] == 150.0 and west[2] == 975.0        # 825 wide, flush
+        assert east[0] == 1425.0 and east[2] == 2250.0      # 825 wide, flush
+        assert east[0] - west[2] == pytest.approx(450.0)    # the aisle
+        lockers = b["insert_locker_row[WS]"]
+        assert lockers[0] == 150.0 and lockers[1] == 150.0
+        assert lockers[3] == pytest.approx(1350.0)          # 2 cells x 600
+        assert b["insert_bed[2W]"][1] - b["insert_locker_row[WS]"][3] \
+            == pytest.approx(50.0)                          # bed clears lockers
+        assert b["insert_bed[1W]"][1] - b["insert_bed[2W]"][3] \
+            == pytest.approx(400.0)                         # gap between beds
+
+    async def test_lockers_move_with_the_frame(self, backend):
+        # Lockers belong on the walls the beds back onto, at the end away from
+        # the bed heads - not on a hardcoded S/N.
+        deep = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        names = {n for n, *_ in deep.payload["boxes"]}
+        assert "insert_locker_row[WS]" in names and "insert_locker_row[ES]" in names
+        assert not any("[SW]" in n or "[NW]" in n for n in names)
+
+    async def test_explicit_axis_overrides_the_derivation(self, backend):
+        # The derivation is a default, not a law: a caller may state the frame.
+        r = await ps.generate_dormitory_room(
+            backend, 6000.0, 2400.0, "arctic", bed_pairs=1, bed_axis="y")
+        assert r.payload["bed_axis"] == "y"
+
+    async def test_unknown_axis_is_rejected(self, backend):
+        with pytest.raises(ValueError):
+            await ps.generate_dormitory_room(
+                backend, 6000.0, 2400.0, "arctic", 1, bed_axis="diagonal")
 
 
 def _boxes_overlap_simple(a, b):

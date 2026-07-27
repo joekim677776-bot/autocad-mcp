@@ -847,6 +847,63 @@ class TestDoubleLoadedCorridorSharedWalls:
                 (y_lo, sorted(faces))
 
 
+class TestRoomNumber:
+    """Phase 4b (2026-07-27): rooms can be numbered, but never by themselves."""
+
+    async def test_number_is_annotation_not_geometry(self, backend):
+        # No bbox in the payload -> _Compose files it under labels, not boxes.
+        # A room number must not obstruct a door or count as furniture.
+        r = await ps.insert_room_number(backend, 3000.0, 1200.0, "101")
+        assert r.ok
+        assert r.payload["bbox"] is None
+        assert r.payload["label_bboxes"] == [["101", [2842.5, 1125.0, 3157.5, 1275.0]]]
+
+    async def test_absent_by_default(self, backend):
+        # Nothing is numbered unless asked: the generator cannot know which room
+        # of the building this is.
+        r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 1)
+        assert not any("insert_room_number" in n for n, *_ in r.payload["labels"])
+
+    async def test_dormitory_number_sits_in_the_clear_centre(self, backend):
+        r = await ps.generate_dormitory_room(
+            backend, 6000.0, 2400.0, "arctic", bed_pairs=1, room_number="101",
+            **CORRIDOR_KW)
+        assert r.payload["verified"] is True, r.payload["warnings"]
+        labels = {n: b for n, *b in r.payload["labels"]}
+        box = labels["insert_room_number:label[101]"]
+        ix0, iy0, ix1, iy1 = r.payload["inner"]
+        assert (box[0] + box[2]) / 2.0 == pytest.approx((ix0 + ix1) / 2.0)
+        assert (box[1] + box[3]) / 2.0 == pytest.approx((iy0 + iy1) / 2.0)
+        # ...and it really is clear of the furniture, not merely centred. The
+        # shell is skipped for the same reason the audit skips it: its bbox is
+        # the whole module, so everything inside "overlaps" it.
+        for name, *fbox in r.payload["boxes"]:
+            if name == "draw_module_outline":
+                continue
+            assert not _boxes_overlap_simple(box, fbox), name
+
+    async def test_studio_number_is_clear_too(self, backend):
+        # The studio is the packed layout; if the centre were going to land on
+        # something, it would be here.
+        s = await ps.generate_studio_module(backend, room_number="201")
+        labels = {n: b for n, *b in s.payload["labels"]}
+        box = labels["insert_room_number:label[201]"]
+        for name, *fbox in s.payload["boxes"]:
+            if name == "draw_module_outline":
+                continue
+            assert not _boxes_overlap_simple(box, fbox), name
+
+    async def test_a_number_landing_on_furniture_is_reported(self, backend):
+        # The check has teeth: the position is not asserted to be safe for an
+        # arbitrary layout, it is CHECKED. Simulated by planting a label on a bed.
+        c = ps._Compose()
+        c.boxes = [("insert_bed[1S]", (3850.0, 2650.0, 5850.0, 3475.0))]
+        c.labels = [("insert_room_number:label[101]",
+                     (4842.5, 3025.0, 5157.5, 3175.0))]
+        hits = c.intersections()
+        assert len(hits) == 1 and "insert_room_number" in hits[0], hits
+
+
 def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])
     dy = min(a[3], b[3]) - max(a[1], b[1])

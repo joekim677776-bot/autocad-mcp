@@ -959,6 +959,49 @@ async def _label_opening(d, label, p1, p2, nx, ny, *, height=LABEL_HEIGHT):
                   height=height, layer=TEXT_LAYER)
 
 
+async def insert_room_number(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, number, *,
+    height: float = LABEL_HEIGHT,
+) -> CommandResult:
+    """Room number as its own MTEXT tag on the TEXT layer, at (x_mm, y_mm).
+
+    ``number`` is whatever the caller says it is — "101", "1.2", "К-3". This
+    generator never invents one: which room this is depends on the building, and
+    only the caller assembling the building knows that.
+
+    Deliberately NOT physical geometry: the payload carries a label_bbox and no
+    ``bbox``, so the tag is checked as annotation (may not overprint anything,
+    does not obstruct a door) rather than as an object. That is the same footing
+    the ВХОД / ОКНО / ЛОКЕРЫ tags are on.
+    """
+    d = _Draw(backend, TEXT_LAYER)
+    await d.mtext(float(x_mm), float(y_mm), str(number), height=float(height),
+                  layer=TEXT_LAYER)
+    return d.result(number=str(number), position=[float(x_mm), float(y_mm)])
+
+
+def _room_number_position(ix0, iy0, ix1, iy1):
+    """Where a room number goes: the centre of the room's CLEAR interior.
+
+    The convention this follows is the ordinary architectural one — a room's
+    number is set in the middle of the space it names, so which room it belongs
+    to is unambiguous. Two alternatives were considered and rejected:
+
+      * beside the entrance — ambiguous exactly where it matters. In a corridor
+        scheme the doors of neighbouring rooms sit on the same wall a few metres
+        apart, and a number drawn near a jamb reads as belonging to the corridor
+        or to the room next door as easily as to this one;
+      * in a free corner — unambiguous but arbitrary, and it moves as soon as
+        the furniture changes.
+
+    The centre is also where this layout has floor: the tag lands in the aisle
+    between the bed rows (dormitory) or between the wardrobe and the desk
+    (studio). It is NOT guaranteed free for an arbitrary layout, and that is the
+    point of running it through the label check rather than hand-placing it.
+    """
+    return ((ix0 + ix1) / 2.0, (iy0 + iy1) / 2.0)
+
+
 async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
     """Door leaf (thin filled rectangle) + 90 deg swing arc on AR-DOOR.
 
@@ -2034,6 +2077,7 @@ async def generate_dormitory_room(
     door_wall: str = "W", door_swing: str = "out", door_offset_mm=None,
     window_wall: str = "E", window_offset_mm=None,
     wall_west=True, wall_east=True, party_wall_thickness_mm=None,
+    room_number=None,
 ) -> CommandResult:
     """4-bed dormitory (общежитие) module in one call. Wall layout (reworked
     2026-07-24): standards + a real thick-wall shell, an entrance door on the
@@ -2132,6 +2176,17 @@ async def generate_dormitory_room(
     a hole in a wall that is not there. Pointing one at a "party" side is allowed
     but flagged — a window into the neighbour's room is a drawing error, and an
     entrance door through a party wall is not what insert_exterior_door draws.
+
+    ``room_number`` (optional) tags the room at the centre of its clear interior
+    (see _room_number_position for why there). It is passed in, never derived:
+    which room this is depends on the building, and the caller assembling the
+    building is the only one that knows. The tag is checked as annotation like
+    every other label, so a number landing on furniture is reported.
+
+    VERIFIED: only bed_pairs=1 (its confirmed, screenshot-checked form). For
+    bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
+    flagged verified=False with a warning — that spacing has never been seen
+    live, so do not treat it as final without a screenshot.
 
     VERIFIED: only bed_pairs=1 (its confirmed, screenshot-checked form). For
     bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
@@ -2270,6 +2325,11 @@ async def generate_dormitory_room(
     #   collision            — physical geometry or labels sharing space;
     #   door_swing_collision — a leaf that cannot complete its travel.
     # Covers this room's own elements plus anything merged in via `scene`.
+    if room_number is not None:
+        rx, ry = _room_number_position(ix0, iy0, ix1, iy1)
+        c.add("insert_room_number",
+              await insert_room_number(backend, rx, ry, room_number))
+
     #   open_side           — a boundary this room left to the neighbour, with no
     #                         neighbouring wall actually there to take it.
     # The strip to look in is OUTSIDE the envelope rectangle, not inside it: with
@@ -2313,6 +2373,7 @@ async def generate_studio_module(
     backend: AutoCADBackend,
     length_mm: float = 6000.0, width_mm: float = 2400.0, series: str = "arctic",
     origin_x: float = 0.0, origin_y: float = 0.0, scene=None,
+    room_number=None,
 ) -> CommandResult:
     """Studio module (студия-модуль) in one call — the element set of
     reference-studio-module-layout.png condensed into one 6000x2400 room:
@@ -2357,6 +2418,9 @@ async def generate_studio_module(
       * entrance door: south wall, swinging out;
       * electrical panel: south wall right beside the entrance door — by the
         вход, never inside the санузел.
+
+    ``room_number`` (optional) tags the room at the centre of its clear interior,
+    as in the dormitory.
 
     NOT VERIFIED LIVE by default — this packed combination is returned
     verified=False; confirm by screenshot before treating it as final.
@@ -2498,6 +2562,11 @@ async def generate_studio_module(
     # (excluding the shell). The studio stays verified=False by design (packed
     # novel combo needs a human screenshot), but any detected clash is still
     # listed explicitly so real problems surface.
+    if room_number is not None:
+        rx, ry = _room_number_position(ix0, iy0, ix1, iy1)
+        c.add("insert_room_number",
+              await insert_room_number(backend, rx, ry, room_number))
+
     audit_warnings, _ = c.audit(exclude={"draw_module_outline"})
     warnings = list(audit_warnings)
     warnings.append("Studio layout is a packed, verified=False-by-design "

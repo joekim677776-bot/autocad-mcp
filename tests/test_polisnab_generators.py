@@ -1149,6 +1149,102 @@ class TestFourBedsOnACorridor:
         assert r.payload["verified"] is True
 
 
+class TestLabelLegibility:
+    """Phase 4b (2026-07-28): tags too close to read apart.
+
+    Found by looking at a screenshot, which is exactly the way it should NOT
+    have to be found - hence the check.
+    """
+
+    # The two ЛОКЕРЫ tags exactly as the live 2400x6000 room emitted them
+    # before the fix: 15 mm apart, no AABB overlap, verified=true, and the
+    # drawing read "ЛОКЕРЫОКЕРЫ".
+    BROKEN_W = (877.5, 712.5, 1192.5, 787.5)
+    BROKEN_E = (1207.5, 712.5, 1522.5, 787.5)
+
+    def _compose(self, *labels):
+        c = ps._Compose()
+        c.labels = list(labels)
+        return c
+
+    def test_the_15mm_case_is_caught(self):
+        c = self._compose(("insert_locker_row[WS]:label[ЛОКЕРЫ]", self.BROKEN_W),
+                          ("insert_locker_row[ES]:label[ЛОКЕРЫ]", self.BROKEN_E))
+        assert c.intersections() == []          # genuinely no overlap - 15 mm apart
+        hits = c.label_legibility_violations()
+        assert len(hits) == 1, hits
+        assert "15 mm apart" in hits[0] and "75 mm" in hits[0]
+
+    def test_it_forces_verified_false(self):
+        c = self._compose(("insert_locker_row[WS]:label[ЛОКЕРЫ]", self.BROKEN_W),
+                          ("insert_locker_row[ES]:label[ЛОКЕРЫ]", self.BROKEN_E))
+        warnings, verified = c.audit()
+        assert verified is False
+        assert any(w.startswith("label_legibility:") for w in warnings)
+
+    def test_the_threshold_is_one_text_height(self):
+        # 74 mm fails, 76 mm passes, for 75 mm-high tags. Pins the rule itself,
+        # not the sample that motivated it.
+        for gap, caught in ((74.0, True), (76.0, False)):
+            b = (self.BROKEN_W[2] + gap, 712.5, self.BROKEN_W[2] + gap + 315.0, 787.5)
+            c = self._compose(("a", self.BROKEN_W), ("b", b))
+            assert bool(c.label_legibility_violations()) is caught, gap
+
+    def test_it_scales_with_the_tag(self):
+        # A 150 mm room number is held to a 150 mm gap, a 75 mm furniture tag
+        # to 75. The taller of the pair sets the bar.
+        small = (0.0, 0.0, 315.0, 75.0)
+        tall = (415.0, 0.0, 730.0, 150.0)        # 100 mm away
+        assert self._compose(("a", small), ("b", tall)).label_legibility_violations()
+
+    def test_overlap_is_not_reported_twice(self):
+        # Overlapping tags are a `collision`; saying it again here would make one
+        # defect look like two.
+        over = (1000.0, 712.5, 1315.0, 787.5)
+        c = self._compose(("a", self.BROKEN_W), ("b", over))
+        assert c.intersections() != []
+        assert c.label_legibility_violations() == []
+
+    def test_diagonal_neighbours_read_apart(self):
+        # Offset both across and along: the larger axis gap is what counts.
+        far = (self.BROKEN_W[2] + 20.0, 1500.0, self.BROKEN_W[2] + 335.0, 1575.0)
+        assert self._compose(("a", self.BROKEN_W), ("b", far)) \
+            .label_legibility_violations() == []
+
+    async def test_the_rotated_room_now_passes(self, backend):
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, room_number="101",
+            **CORRIDOR_KW)
+        assert r.payload["verified"] is True, r.payload["warnings"]
+        assert r.payload["warnings"] == []
+        lab = {n: b for n, *b in r.payload["labels"]}
+        w = lab["insert_locker_row[WS]:label[ЛОКЕРЫ]"]
+        e = lab["insert_locker_row[ES]:label[ЛОКЕРЫ]"]
+        assert e[0] - w[2] == pytest.approx(150.0)     # was 15 mm
+
+    async def test_each_tag_sits_at_its_own_bank(self, backend):
+        # Not "somewhere in the middle": each tag is on its own side of the
+        # room's centre line, in front of the bank it names.
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        b = {n: box for n, *box in r.payload["boxes"]}
+        lab = {n: box for n, *box in r.payload["labels"]}
+        mid = (b["draw_module_outline"][0] + b["draw_module_outline"][2]) / 2.0
+        w = lab["insert_locker_row[WS]:label[ЛОКЕРЫ]"]
+        e = lab["insert_locker_row[ES]:label[ЛОКЕРЫ]"]
+        assert w[2] < mid < e[0]
+        assert w[0] > b["insert_locker_row[WS]"][2]    # clear of, and facing, its bank
+        assert e[2] < b["insert_locker_row[ES]"][0]
+
+    async def test_the_wide_room_keeps_its_tags_apart_too(self, backend):
+        r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 2)
+        assert r.payload["verified"] is True, r.payload["warnings"]
+        lab = {n: b for n, *b in r.payload["labels"]}
+        s = lab["insert_locker_row[SW]:label[ЛОКЕРЫ]"]
+        n = lab["insert_locker_row[NW]:label[ЛОКЕРЫ]"]
+        assert n[1] - s[3] == pytest.approx(630.0)     # was 255 mm
+
+
 class TestBedAxis:
     """Phase 4b (2026-07-28): the 90-degree turn for a 2400-facade room."""
 

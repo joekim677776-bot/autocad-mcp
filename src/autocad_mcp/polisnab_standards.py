@@ -1912,7 +1912,20 @@ async def insert_locker_row(
     if label:
         lbl_h = LABEL_HEIGHT / 2.0                           # 75 mm for the locker tag
         row_mid = offset_mm + n * cw / 2.0
-        lp = P(row_mid, front + lbl_clear + lbl_h + 150.0)   # clear of the row
+        # Stand-off is a clearance from the row front to the tag's NEAR EDGE, so
+        # it has to be measured against the text's extent IN THE STAND-OFF
+        # DIRECTION. The tag is always horizontal: on a N/S wall the stand-off
+        # runs across its height (75 mm), on a W/E wall across its WIDTH (315 mm
+        # for "ЛОКЕРЫ") - four times as much. The old code added the height in
+        # both cases and pushed the tag centre out by a further fixed 150 mm,
+        # which put it a hair short of the room's centre line. Two banks facing
+        # each other across a 2400 mm room then left their tags 15 mm apart:
+        # no AABB overlap, so every check passed, and the drawing read
+        # "ЛОКЕРЫОКЕРЫ". Measuring the right dimension keeps each tag in front
+        # of its OWN bank instead of meeting in the middle.
+        tw, th = _text_aabb(0.0, 0.0, label, lbl_h)[2] * 2.0, lbl_h
+        half = (tw if abs(nx) > abs(ny) else th) / 2.0
+        lp = P(row_mid, front + lbl_clear + half)
         await d.mtext(lp[0], lp[1], str(label), height=lbl_h, layer=TEXT_LAYER)
 
     return d.result(wall_side=str(wall_side), count=n, cell_width=cw, depth=dp)
@@ -2200,6 +2213,47 @@ class _Compose:
                     f"- the room is open there")
         return out
 
+    def label_legibility_violations(self, exclude=()):
+        """Two tags that do not overlap but sit too close to be read apart.
+
+        `intersections` answers "do these occupy the same space?", and for two
+        labels 15 mm apart the honest answer is no - which is how a bank of
+        lockers came out tagged "ЛОКЕРЫОКЕРЫ" with verified=true. Non-overlap is
+        not legibility, so it gets its own question and its own category.
+
+        THE NUMBER: the minimum clear gap is ONE TEXT HEIGHT - the taller of the
+        two tags. That is the typographic leading argument, not a round number
+        picked to make this case fail: lines set closer together than about one
+        em stop reading as separate lines, which is exactly the failure here.
+        It also scales with the annotation instead of being an absolute, so a
+        150 mm room tag is held to a wider gap than a 75 mm furniture tag, as it
+        should be. The existing scenes clear it with room to spare (the wide
+        dormitory's two locker tags are 630 mm apart), so it is a real floor and
+        not a threshold tuned to the sample.
+
+        Diagonal neighbours are measured on the LARGER axis gap: two tags offset
+        both across and along read apart even when one separation is small.
+        Overlapping pairs are skipped - `collision` already reported those, and
+        saying it twice would just make the same defect look like two."""
+        ex = set(exclude)
+        own = [(n, b) for (n, b) in self.labels if n not in ex]
+        out = []
+        for i in range(len(own)):
+            ni, bi = own[i]
+            for nj, bj in own[i + 1:] + self.ext_labels:
+                if _boxes_overlap(bi, bj):
+                    continue
+                dx = max(bj[0] - bi[2], bi[0] - bj[2], 0.0)
+                dy = max(bj[1] - bi[3], bi[1] - bj[3], 0.0)
+                gap = max(dx, dy)
+                need = max(bi[3] - bi[1], bj[3] - bj[1])
+                if gap < need:
+                    out.append(
+                        f"label_legibility: '{ni}' <-> '{nj}' are {gap:.0f} mm "
+                        f"apart, under the {need:.0f} mm (one text height) needed "
+                        f"to read them as separate tags")
+        return out
+
     def completeness_violations(self, shortfalls):
         """Did the room actually get what was ORDERED?
 
@@ -2233,6 +2287,7 @@ class _Compose:
         w = (self.intersections(exclude=exclude)
              + self.swing_collisions(exclude=exclude)
              + self.clearance_violations(exclude=exclude)
+             + self.label_legibility_violations(exclude=exclude)
              + self.open_side_violations(open_sides)
              + self.completeness_violations(shortfalls))
         return w, (len(w) == 0)

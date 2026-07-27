@@ -2301,11 +2301,6 @@ async def generate_dormitory_room(
     bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
     flagged verified=False with a warning — that spacing has never been seen
     live, so do not treat it as final without a screenshot.
-
-    VERIFIED: only bed_pairs=1 (its confirmed, screenshot-checked form). For
-    bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
-    flagged verified=False with a warning — that spacing has never been seen
-    live, so do not treat it as final without a screenshot.
     """
     L = float(length_mm)
     W = float(width_mm)
@@ -2487,6 +2482,8 @@ async def generate_studio_module(
     backend: AutoCADBackend,
     length_mm: float = 6000.0, width_mm: float = 2400.0, series: str = "arctic",
     origin_x: float = 0.0, origin_y: float = 0.0, scene=None,
+    door_swing: str = "out",
+    wall_west=True, wall_east=True, party_wall_thickness_mm=None,
     room_number=None,
 ) -> CommandResult:
     """Studio module (студия-модуль) in one call — the element set of
@@ -2533,6 +2530,34 @@ async def generate_studio_module(
       * electrical panel: south wall right beside the entrance door — by the
         вход, never inside the санузел.
 
+    SHARED WALLS IN A ROW. ``wall_west`` / ``wall_east`` /
+    ``party_wall_thickness_mm`` behave exactly as in generate_dormitory_room —
+    True (envelope) / "party" (shared, 100 mm) / False (the neighbour owns it) —
+    and ``room_row_walls(i, n)`` gives the row rule for both generators.
+
+    What differs from the dormitory is what the moving faces drag with them. This
+    layout is ASYMMETRIC: the entrance, window, bed, wardrobe and panel hang off
+    the WEST inner face, while the санузел block (partition, shower, sink,
+    toilet) and the desk/chair hang off the EAST one via ``san_x``. Thinning or
+    dropping an end wall therefore moves those two groups by different amounts —
+    the санузел keeps its 1100 mm because san_x and ix1 move together, and the
+    living zone absorbs the difference. The dormitory got away without noticing
+    because its layout is symmetric about the E-W axis; here it is visible, and
+    it is only safe because these flags never make a wall THICKER than the
+    envelope, so the clear interior can grow but not shrink. Pass a
+    ``party_wall_thickness_mm`` above the series thickness and the collision
+    check is what will tell you.
+
+    ``door_swing`` is parameterised for the corridor scheme ("in"), for the same
+    reason as the dormitory: a door onto a shared corridor that opens outward
+    blocks the passage. NOT parameterised, on purpose: ``door_wall`` and
+    ``window_wall``. In the dormitory those could be swapped N<->S freely because
+    the furniture is mirror-symmetric; here the whole layout is built around
+    entrance-on-S and window-on-N (convector under the window, panel beside the
+    door, bed head to the north). Swapping them needs the layout mirrored, not a
+    parameter, so a studio can serve a corridor to its SOUTH and not one to its
+    north. That is a separate job, not a flag.
+
     ``room_number`` (optional) tags the room at the centre of its clear interior,
     as in the dormitory.
 
@@ -2546,11 +2571,22 @@ async def generate_studio_module(
     W = float(width_mm)
     ox, oy = float(origin_x), float(origin_y)
     t = _resolve_wall_thickness(series, None)
-    modkw = dict(module_origin=(ox, oy),
-                 module_length=L, module_width=W, wall_thickness=t)
+    tp = (float(party_wall_thickness_mm) if party_wall_thickness_mm is not None
+          else PARTY_WALL_THICKNESS)
+    # Only the two SHORT end walls vary; N and S stay envelope (one faces the
+    # corridor, the other the outdoors) — same as the dormitory.
+    side_t = {"S": t, "N": t,
+              "W": _end_wall_thickness("wall_west", wall_west, t, tp),
+              "E": _end_wall_thickness("wall_east", wall_east, t, tp)}
+    modkw = dict(module_origin=(ox, oy), module_length=L, module_width=W,
+                 wall_thickness=t, side_thickness=side_t)
     # Inner faces in WORLD coordinates — see the dormitory generator: everything
     # absolute is written against these, so the origin propagates by construction.
-    ix0, iy0, ix1, iy1 = ox + t, oy + t, ox + L - t, oy + W - t
+    # Per-side since the party wall landed: the WEST group (door/window/bed/
+    # wardrobe/panel) rides on ix0 and the EAST group (санузел, desk, chair) on
+    # ix1, and those two now move independently.
+    ix0, iy0 = ox + side_t["W"], oy + t
+    ix1, iy1 = ox + L - side_t["E"], oy + W - t
     c = _Compose()
     c.absorb(scene)
 
@@ -2559,7 +2595,7 @@ async def generate_studio_module(
     c.add("setup_dimstyle", await setup_dimstyle(backend))
     c.add("draw_module_outline",
           await draw_module_outline(backend, length_mm=L, width_mm=W, series=series,
-                                    origin=(ox, oy)))
+                                    origin=(ox, oy), side_thickness=side_t))
 
     # Zone X-bands: living/bedroom (west, larger) | санузел (east, compact 1100).
     san_x = ix1 - 1100.0                      # санузел partition line
@@ -2576,7 +2612,7 @@ async def generate_studio_module(
     door_center = ix0 + 3100.0
     c.add("insert_exterior_door",
           await insert_exterior_door(backend, "S", door_center - door_w / 2.0 - ox,
-                                     door_w, "out", label="ВХОД", **modkw))
+                                     door_w, door_swing, label="ВХОД", **modkw))
     win_w, win_center = 1120.0, ix0 + 3050.0
     c.add("insert_window",
           await insert_window(backend, "N", win_center - win_w / 2.0 - ox, win_w,
@@ -2681,7 +2717,14 @@ async def generate_studio_module(
         c.add("insert_room_number",
               await insert_room_number(backend, rx, ry, room_number))
 
-    audit_warnings, _ = c.audit(exclude={"draw_module_outline"})
+    open_sides = []
+    if side_t["W"] <= 0.0:
+        open_sides.append(("draw_module_outline:wall[W]", (ox - tp, iy0, ox, iy1)))
+    if side_t["E"] <= 0.0:
+        open_sides.append(("draw_module_outline:wall[E]",
+                           (ox + L, iy0, ox + L + tp, iy1)))
+    audit_warnings, _ = c.audit(exclude={"draw_module_outline"},
+                                open_sides=open_sides)
     warnings = list(audit_warnings)
     warnings.append("Studio layout is a packed, verified=False-by-design "
                     "combination (double bed + enclosed санузел + engineering "
@@ -2689,4 +2732,6 @@ async def generate_studio_module(
                     "before treating it as final.")
     return c.result(series=str(series).strip().lower(), module=[L, W],
                     origin=[ox, oy], outer=[ox, oy, ox + L, oy + W],
-                    wall_thickness=t, verified=False, warnings=warnings)
+                    wall_thickness=t, side_thickness=side_t,
+                    inner=[ix0, iy0, ix1, iy1],
+                    verified=False, warnings=warnings)

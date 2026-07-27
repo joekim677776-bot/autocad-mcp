@@ -678,7 +678,10 @@ async def polisnab(
     last {false, true}. Drawn this way the boundary between two neighbours is ONE
     wall instead of two 150 mm envelopes face to face, and the pitch is unchanged.
     A wall that is not drawn cannot take an opening — door_wall / window_wall
-    pointing at one is rejected outright.
+    pointing at one is rejected outright. generate_studio_module takes the same
+    three flags plus door_swing (for a corridor, "in"); its door_wall/window_wall
+    stay fixed on S/N because that layout is asymmetric and would need mirroring,
+    not a flag.
 
     Both composites take room_number (optional, e.g. "101"), drawn at the centre
     of the room's clear interior and checked as annotation like every other tag.
@@ -848,7 +851,10 @@ async def polisnab(
             length_mm=d.get("length_mm", 6000.0), width_mm=d.get("width_mm", 2400.0),
             series=d.get("series", "arctic"),
             origin_x=d.get("origin_x", 0.0), origin_y=d.get("origin_y", 0.0),
-            scene=d.get("scene"), room_number=d.get("room_number"),
+            scene=d.get("scene"), door_swing=d.get("door_swing", "out"),
+            wall_west=d.get("wall_west", True), wall_east=d.get("wall_east", True),
+            party_wall_thickness_mm=d.get("party_wall_thickness_mm"),
+            room_number=d.get("room_number"),
         )
     else:
         return _json({"error": f"Unknown polisnab operation: {operation}"})

@@ -984,6 +984,85 @@ class TestCorridorEnds:
             await self._corridor(backend, end_west="hatch")
 
 
+class TestStudioPartyWall:
+    """Phase 4b (2026-07-27): the dormitory's party-wall idiom, ported."""
+
+    async def _row(self, backend, i, n, **kw):
+        return await ps.generate_studio_module(
+            backend, 6000.0, 2400.0, "arctic", origin_x=6000.0 * i, origin_y=0.0,
+            door_swing="in", **{**ps.room_row_walls(i, n), **kw})
+
+    async def test_same_flags_same_thickness_as_dormitory(self, backend):
+        a = await self._row(backend, 0, 2)
+        b = await self._row(backend, 1, 2, scene=[a.payload])
+        assert a.payload["side_thickness"]["E"] == ps.PARTY_WALL_THICKNESS
+        assert b.payload["side_thickness"]["W"] == 0.0
+        # One band between the two interiors, 100 mm.
+        assert a.payload["inner"][2] == pytest.approx(5900.0)
+        assert b.payload["inner"][0] == pytest.approx(6000.0)
+
+    async def test_boundary_is_one_wall(self, backend):
+        a = await self._row(backend, 0, 2)
+        await self._row(backend, 1, 2, scene=[a.payload])
+        faces = sorted({round(e.dxf.start.x, 3) for e in backend._msp.query("LINE")
+                        if e.dxf.layer == ps.AR_WALL_LAYER
+                        and abs(e.dxf.start.x - e.dxf.end.x) < 1e-6
+                        and abs(e.dxf.start.y - e.dxf.end.y) > 500.0})
+        # west envelope | sanuzel A | PARTY | sanuzel B | east envelope
+        assert faces == [0.0, 150.0, 4750.0, 4850.0, 5900.0, 6000.0,
+                         10700.0, 10800.0, 11850.0, 12000.0], faces
+
+    async def test_the_asymmetry_the_dormitory_hid(self, backend):
+        # The dormitory is mirror-symmetric E-W, so moving both end faces went
+        # unnoticed. The studio is not: the WEST group (bed) rides on ix0 and the
+        # EAST group (sanuzel) on ix1, and they move by different amounts.
+        first = await self._row(backend, 0, 3)     # W=150 envelope, E=100 party
+        mid = await self._row(backend, 1, 3)       # W=0   neighbour, E=100 party
+        assert mid.payload["inner"][0] - first.payload["inner"][0] == \
+            pytest.approx(6000.0 - 150.0)          # west face moved out by 150
+        assert mid.payload["inner"][2] - first.payload["inner"][2] == \
+            pytest.approx(6000.0)                  # east face moved by the pitch
+        # The sanuzel keeps its 1100 mm regardless, because san_x tracks ix1.
+        for r in (first, mid):
+            partition = [b for n, *b in r.payload["boxes"] if "san_N" in n][0]
+            assert r.payload["inner"][2] - partition[2] == pytest.approx(1050.0)
+
+    async def test_open_side_applies_to_the_studio_too(self, backend):
+        lone = await ps.generate_studio_module(
+            backend, origin_x=6000.0, origin_y=0.0, wall_west=False)
+        assert any(w.startswith("open_side:") for w in lone.payload["warnings"]), \
+            lone.payload["warnings"]
+
+    async def test_row_has_no_real_collisions(self, backend):
+        # verified stays False by design for the studio, so assert on the
+        # collision families instead of on the flag.
+        scene = []
+        for i in range(2):
+            r = await self._row(backend, i, 2, scene=list(scene),
+                                room_number=f"{201 + i}")
+            real = [w for w in r.payload["warnings"]
+                    if w.startswith(("collision:", "door_swing_collision:",
+                                     "clearance_blocked:", "open_side:"))]
+            assert real == [], (i, real)
+            scene.append(r.payload)
+
+    async def test_door_swing_is_parameterised_but_walls_are_not(self, backend):
+        # What was added, and what deliberately was not: "in" for a corridor,
+        # while door_wall/window_wall stay fixed because this layout would need
+        # mirroring rather than a flag.
+        import inspect
+        sig = inspect.signature(ps.generate_studio_module)
+        assert "door_swing" in sig.parameters
+        assert "door_wall" not in sig.parameters
+        assert "window_wall" not in sig.parameters
+        out = await ps.generate_studio_module(backend, door_swing="out")
+        inn = await ps.generate_studio_module(backend, door_swing="in")
+        s_out = {n: b for n, *b in out.payload["swings"]}["insert_exterior_door"]
+        s_in = {n: b for n, *b in inn.payload["swings"]}["insert_exterior_door"]
+        assert s_out[1] < 0.0            # sweeps south, outside the module
+        assert s_in[1] >= 150.0          # sweeps north, into the room
+
+
 def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])
     dy = min(a[3], b[3]) - max(a[1], b[1])

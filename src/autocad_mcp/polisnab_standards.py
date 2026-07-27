@@ -2527,10 +2527,17 @@ async def generate_dormitory_room(
 
     lock_cw, lock_depth, lock_n = 600.0, 420.0, 2
     lockkw = {k: v for k, v in modkw.items() if k != "side_thickness"}
+    # UNTAGGED in the turned layout. There the two banks flank the entrance on a
+    # 2400 mm facade, and both tags land in the one strip of floor left between
+    # them - legible now that they are spaced, but crowding the door and its
+    # swing arc for no gain: a pair of locker banks either side of the entrance
+    # reads as lockers without being told. The wide room keeps its tags, where
+    # the banks sit on opposite walls and there is floor to put them on.
+    lock_label = "ЛОКЕРЫ" if bed_axis == "x" else None
     for wall in row_walls:
         c.add(f"insert_locker_row[{wall}{lock_end}]",
               await insert_locker_row(backend, wall, lock_off, lock_cw, lock_depth,
-                                      lock_n, label="ЛОКЕРЫ", **lockkw))
+                                      lock_n, label=lock_label, **lockkw))
 
     # 4) Bed pair(s) by the east wall — head-to-east (rot -90). A pair is a
     #    south + north bed sharing an X range, kept apart by a clear GAP, not a

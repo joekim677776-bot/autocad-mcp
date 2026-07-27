@@ -1211,30 +1211,20 @@ class TestLabelLegibility:
         assert self._compose(("a", self.BROKEN_W), ("b", far)) \
             .label_legibility_violations() == []
 
-    async def test_the_rotated_room_now_passes(self, backend):
-        r = await ps.generate_dormitory_room(
-            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, room_number="101",
-            **CORRIDOR_KW)
-        assert r.payload["verified"] is True, r.payload["warnings"]
-        assert r.payload["warnings"] == []
-        lab = {n: b for n, *b in r.payload["labels"]}
-        w = lab["insert_locker_row[WS]:label[ЛОКЕРЫ]"]
-        e = lab["insert_locker_row[ES]:label[ЛОКЕРЫ]"]
-        assert e[0] - w[2] == pytest.approx(150.0)     # was 15 mm
-
-    async def test_each_tag_sits_at_its_own_bank(self, backend):
-        # Not "somewhere in the middle": each tag is on its own side of the
-        # room's centre line, in front of the bank it names.
-        r = await ps.generate_dormitory_room(
-            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
-        b = {n: box for n, *box in r.payload["boxes"]}
-        lab = {n: box for n, *box in r.payload["labels"]}
-        mid = (b["draw_module_outline"][0] + b["draw_module_outline"][2]) / 2.0
-        w = lab["insert_locker_row[WS]:label[ЛОКЕРЫ]"]
-        e = lab["insert_locker_row[ES]:label[ЛОКЕРЫ]"]
-        assert w[2] < mid < e[0]
-        assert w[0] > b["insert_locker_row[WS]"][2]    # clear of, and facing, its bank
-        assert e[2] < b["insert_locker_row[ES]"][0]
+    async def test_the_stand_off_measures_the_right_dimension(self, backend):
+        # The bug itself, at the level it lived: on a N/S wall the stand-off
+        # crosses the tag's HEIGHT, on a W/E wall its WIDTH. Measuring the
+        # height in both cases is what pushed the W/E tag to the room's centre.
+        kw = dict(module_origin=(0, 0), module_length=2400.0,
+                  module_width=6000.0, wall_thickness=150.0)
+        w = await ps.insert_locker_row(backend, "W", 150.0, 600.0, 420.0, 2,
+                                       label="ЛОКЕРЫ", **kw)
+        e = await ps.insert_locker_row(backend, "E", 150.0, 600.0, 420.0, 2,
+                                       label="ЛОКЕРЫ", **kw)
+        wb = w.payload["label_bboxes"][0][1]
+        eb = e.payload["label_bboxes"][0][1]
+        assert eb[0] - wb[2] == pytest.approx(150.0)   # was 15 mm
+        assert wb[2] < 1200.0 < eb[0]                  # each stays on its side
 
     async def test_the_wide_room_keeps_its_tags_apart_too(self, backend):
         r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 2)

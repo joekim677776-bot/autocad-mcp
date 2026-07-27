@@ -38,6 +38,13 @@ The LISP dispatcher (`lisp-code/mcp_dispatch.lsp`) lives in the namespace of a
   `-PLOT` silently fail on the malformed path. Symptom: the tool returns
   `ok:true` but nothing is written and `DWGTITLED` stays `0`. Forward slashes
   are accepted everywhere by AutoCAD and sidestep all escaping.
+- **Не доверяй имени документа в ответе `drawing create`.** Оно возвращает имя
+  ПРЕДЫДУЩЕГО документа, а не нового: после `create` payload сообщал
+  `polisnab-corridor-block-2x2-….dwg`, хотя реально открылся чистый чертёж.
+  Сверяться по надёжному признаку — `entity_count` из `drawing info` (у нового
+  документа единицы объектов вместо сотен), а не по `DWGNAME`, который тоже
+  отстаёт. Та же категория, что `ok:true`≠успех: ответ формируется раньше, чем
+  состояние успевает измениться, и звучит правдоподобно.
 - **`ok:true` is not proof of success.** `drawing save` / `save_as_dxf` /
   `plot_pdf` echo the path back without checking the file was written — they
   report success even when the underlying `(command …)` no-ops. Always verify

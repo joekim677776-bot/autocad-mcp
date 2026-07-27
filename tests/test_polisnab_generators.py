@@ -6,6 +6,8 @@ against the 1200x2000 spec (PROJECT-BRIEF section 7, and the "Кровать 120
 pixel-calibration anchor in polisnab_standards.py). No AutoCAD needed.
 """
 
+import math
+
 import pytest
 
 from autocad_mcp import polisnab_standards as ps
@@ -1233,6 +1235,57 @@ class TestLabelLegibility:
         s = lab["insert_locker_row[SW]:label[ЛОКЕРЫ]"]
         n = lab["insert_locker_row[NW]:label[ЛОКЕРЫ]"]
         assert n[1] - s[3] == pytest.approx(630.0)     # was 255 mm
+
+
+class TestDoorOpenAngle:
+    """Phase 4b (2026-07-28): the entrance leaf is DRAWN at 45 deg.
+
+    The distinction the whole class exists to pin: how far open the leaf is
+    drawn is a draughting convention; how much floor the door needs is physics.
+    """
+
+    async def test_the_clearance_stays_a_full_quarter_turn(self, backend):
+        # If this ever tracks open_deg, every door's reserved floor silently
+        # shrinks and the bed rows - which are tiled into the frontage these
+        # sectors leave free - move in behind it.
+        kw = dict(module_origin=(0, 0), module_length=6000.0,
+                  module_width=2400.0, wall_thickness=150.0)
+        wide = await ps.insert_exterior_door(backend, "S", 2525.0, 950.0, "in",
+                                             open_deg=90.0, **kw)
+        narrow = await ps.insert_exterior_door(backend, "S", 2525.0, 950.0, "in",
+                                               open_deg=45.0, **kw)
+        assert narrow.payload["swing_bbox"] == pytest.approx(
+            wide.payload["swing_bbox"])
+
+    async def test_the_swing_still_reaches_the_full_leaf_width(self, backend):
+        kw = dict(module_origin=(0, 0), module_length=6000.0,
+                  module_width=2400.0, wall_thickness=150.0)
+        r = await ps.insert_exterior_door(backend, "S", 2525.0, 950.0, "in", **kw)
+        x0, y0, x1, y1 = r.payload["swing_bbox"]
+        assert x1 - x0 == pytest.approx(950.0)
+        assert y1 - y0 == pytest.approx(950.0)
+
+    async def test_the_leaf_geometry_follows_the_angle(self, backend):
+        # At 45 the leaf tip sits diagonally, not square to the wall.
+        kw = dict(module_origin=(0, 0), module_length=6000.0,
+                  module_width=2400.0, wall_thickness=150.0)
+        r = await ps.insert_exterior_door(backend, "S", 2525.0, 950.0, "in",
+                                          open_deg=45.0, **kw)
+        pts = [p for e in backend._msp.query("LWPOLYLINE")
+               if e.dxf.layer == ps.AR_DOOR_LAYER and e.closed
+               for p in e.get_points("xy")]
+        hinge = (2525.0, 150.0)
+        far = max(pts, key=lambda p: (p[0] - hinge[0]) ** 2 + (p[1] - hinge[1]) ** 2)
+        ang = math.degrees(math.atan2(far[1] - hinge[1], far[0] - hinge[0]))
+        assert ang == pytest.approx(45.0, abs=3.0)
+
+    async def test_the_dormitory_draws_its_entrance_at_45(self, backend):
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        assert r.payload["verified"] is True, r.payload["warnings"]
+        assert r.payload["beds_placed"] == 4
+        swing = {n: b for n, *b in r.payload["swings"]}["insert_exterior_door"]
+        assert swing[2] - swing[0] == pytest.approx(950.0)   # clearance unchanged
 
 
 class TestBedAxis:

@@ -841,6 +841,7 @@ async def polisnab(
             party_wall_thickness_mm=d.get("party_wall_thickness_mm"),
             room_number=d.get("room_number"),
             bed_axis=d.get("bed_axis", "auto"),
+            door_open_deg=float(d.get("door_open_deg", 45.0)),
         )
     elif operation == "insert_corridor":
         result = await ps.insert_corridor(

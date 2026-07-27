@@ -1156,8 +1156,11 @@ def _room_number_position(ix0, iy0, ix1, iy1):
     return ((ix0 + ix1) / 2.0, (iy0 + iy1) / 2.0)
 
 
-async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
-    """Door leaf (thin filled rectangle) + 90 deg swing arc on AR-DOOR.
+async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width, open_deg=90.0):
+    """Door leaf (thin filled rectangle) + swing arc on AR-DOOR.
+
+    ``open_deg`` is how far open the LEAF IS DRAWN (default 90). It changes the
+    glyph only - see the note on the return value.
 
     ``hinge`` is the hinge point; ``along_unit`` the unit vector along the wall
     toward the far jamb (the leaf's closed direction); ``swing_dir`` the unit
@@ -1171,22 +1174,37 @@ async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
     sx, sy = swing_dir
     lt = DOOR_LEAF_THICKNESS
     w = float(width)
-    A = (hinge[0], hinge[1])
-    B = (A[0] + ux * lt, A[1] + uy * lt)
-    C = (B[0] + sx * w, B[1] + sy * w)
-    D = (A[0] + sx * w, A[1] + sy * w)
-    await d.poly([A, B, C, D], closed=True, layer=AR_DOOR_LAYER)
-    # 90 deg swing arc: centre at hinge, radius = leaf width, from the open tip
-    # (along swing_dir) round to the closed position (along the wall, +along).
     a_u = math.degrees(math.atan2(uy, ux)) % 360.0
     a_s = math.degrees(math.atan2(sy, sx)) % 360.0
-    if abs(((a_u - a_s) % 360.0) - 90.0) < 1.0:
-        sa, ea = a_s, a_u
-    else:
-        sa, ea = a_u, a_s
+    # Which way round the leaf travels: +1 if the open direction is CCW from the
+    # wall, -1 if CW. Everything below is expressed in terms of this so the
+    # drawn angle can be anything between closed and fully open.
+    turn = 1.0 if ((a_s - a_u) % 360.0) < 180.0 else -1.0
+    ang = float(open_deg)
+    a_leaf = a_u + turn * ang
+    dx, dy = math.cos(math.radians(a_leaf)), math.sin(math.radians(a_leaf))
+    # Leaf thickness runs perpendicular to the leaf, on the closed side.
+    a_thick = math.radians(a_leaf - turn * 90.0)
+    tx, ty = math.cos(a_thick), math.sin(a_thick)
+    A = (hinge[0], hinge[1])
+    B = (A[0] + tx * lt, A[1] + ty * lt)
+    C = (B[0] + dx * w, B[1] + dy * w)
+    D = (A[0] + dx * w, A[1] + dy * w)
+    await d.poly([A, B, C, D], closed=True, layer=AR_DOOR_LAYER)
+    # Swing arc: centre at hinge, radius = leaf width, from the closed position
+    # (along the wall) round to the drawn open position.
+    sa, ea = (a_u, a_leaf) if turn > 0 else (a_leaf, a_u)
     await d.poly(_arc_points(hinge[0], hinge[1], w, sa, ea), closed=False,
                  layer=AR_DOOR_LAYER, linetype=SWING_LINETYPE)
-    return _sector_aabb(hinge[0], hinge[1], w, sa, ea)
+    # CLEARANCE IS NOT THE GLYPH. The returned sector is the FULL quarter turn,
+    # whatever angle was drawn. Showing a leaf at 45 deg is a draughting
+    # convention for a less cluttered plan; the door still physically travels
+    # 90 deg, and the floor it needs must stay empty. Deriving the clearance
+    # from open_deg instead would silently shrink every door's reserved space
+    # the moment someone tidied the drawing - and the bed rows, which are laid
+    # into the frontage these sectors leave free, would move in behind it.
+    fa, fe = (a_u, a_u + 90.0) if turn > 0 else (a_u - 90.0, a_u)
+    return _sector_aabb(hinge[0], hinge[1], w, fa % 360.0, fe % 360.0)
 
 
 async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
@@ -1204,6 +1222,7 @@ async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
 async def _draw_door(
     backend, *, wall_side, offset_mm, width_mm, swing, layer, label=None,
     module_origin, module_length, module_width, wall_thickness, side_thickness=None,
+    open_deg=90.0,
 ):
     """Door in a thick (two-face + fill) wall. Cuts the opening through BOTH
     faces and the grey fill by erasing the affected wall side over the opening
@@ -1249,7 +1268,7 @@ async def _draw_door(
     inward = str(swing).strip().lower() in ("in", "inside", "internal", "i")
     sdir = (nx, ny) if inward else (-nx, -ny)
     hinge = P(a, t) if inward else P(a, 0.0)
-    swing_box = await _draw_door_leaf(d, hinge, (ux, uy), sdir, w)
+    swing_box = await _draw_door_leaf(d, hinge, (ux, uy), sdir, w, open_deg)
 
     await _label_opening(d, label, p1, p2, nx, ny)
     # bbox stays the OPENING rect (the hole in the wall) — that is the door's
@@ -1264,10 +1283,14 @@ async def insert_exterior_door(
     backend: AutoCADBackend, wall_side: str, offset_mm: float,
     width_mm: float = 950.0, swing: str = "out", *, label: str | None = None,
     module_origin=None, module_length=None, module_width=None, wall_thickness=None,
-    side_thickness=None,
+    side_thickness=None, open_deg: float = 45.0,
 ) -> CommandResult:
     """Exterior (entrance) door: cuts the thick-wall opening (both faces + fill +
-    jambs) and draws the leaf + 90 deg swing arc (radius = width) on AR-DOOR.
+    jambs) and draws the leaf + swing arc (radius = width) on AR-DOOR.
+
+    ``open_deg`` is how far open the leaf is DRAWN - 45 by default, which keeps
+    the entrance area readable on a plan. The clearance the door reserves is the
+    full 90 deg quarter turn regardless; see _draw_door_leaf.
 
     Real leaf size is 950 x 2070 mm; only the width matters in a 2D plan — the
     2070 mm height is for a future section/elevation. Default swing is "out"
@@ -1281,7 +1304,7 @@ async def insert_exterior_door(
         module_length=module_length or m["length"],
         module_width=module_width or m["width"],
         wall_thickness=wall_thickness or m["wall_thickness"],
-        side_thickness=side_thickness,
+        side_thickness=side_thickness, open_deg=open_deg,
     )
 
 
@@ -2314,7 +2337,7 @@ async def generate_dormitory_room(
     door_wall: str = "W", door_swing: str = "out", door_offset_mm=None,
     window_wall: str = "E", window_offset_mm=None,
     wall_west=True, wall_east=True, party_wall_thickness_mm=None,
-    room_number=None, bed_axis: str = "auto",
+    room_number=None, bed_axis: str = "auto", door_open_deg: float = 45.0,
 ) -> CommandResult:
     """4-bed dormitory (общежитие) module in one call. Wall layout (reworked
     2026-07-24): standards + a real thick-wall shell, an entrance door on the
@@ -2489,7 +2512,7 @@ async def generate_dormitory_room(
                 else (wall_run(door_wall) - door_w) / 2.0)      # centred by default
     c.add("insert_exterior_door",
           await insert_exterior_door(backend, door_wall, door_off, door_w, door_swing,
-                                     label="ВХОД", **modkw))
+                                     label="ВХОД", open_deg=door_open_deg, **modkw))
     win_w = min(1120.0, wall_run(window_wall) - 2 * t - 200.0)
     win_off = (float(window_offset_mm) if window_offset_mm is not None
                else (wall_run(window_wall) - win_w) / 2.0)

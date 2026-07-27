@@ -1063,6 +1063,44 @@ class TestStudioPartyWall:
         assert s_in[1] >= 150.0          # sweeps north, into the room
 
 
+class TestCompleteness:
+    """Phase 4b (2026-07-28): a room that came out smaller than ordered.
+
+    Every other family asks whether something is in the way. This one asks
+    whether what was ordered got built - and it exists because the answer used
+    to be flattering: a dormitory that dropped both bed pairs for lack of floor
+    reported verified=True, because there were no beds left to collide.
+    """
+
+    async def test_shortfall_forces_verified_false(self, backend):
+        # The exact configuration from the diagnostic: swapped proportions, so
+        # no bed fits at all. It used to come back verified=True with zero beds.
+        r = await ps.generate_dormitory_room(
+            backend, 2400.0, 6000.0, "arctic", bed_pairs=2)
+        assert r.ok
+        assert r.payload["beds_placed"] == 0
+        assert r.payload["verified"] is False
+        inc = [w for w in r.payload["warnings"] if w.startswith("incomplete:")]
+        assert len(inc) == 1, r.payload["warnings"]
+        assert "0 of 4 placed" in inc[0]
+
+    async def test_a_complete_room_says_nothing(self, backend):
+        # Discriminating, not always-on.
+        r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 2)
+        assert r.payload["beds_placed"] == r.payload["beds_requested"] == 4
+        assert not [w for w in r.payload["warnings"] if w.startswith("incomplete:")]
+
+    async def test_studio_roster_is_checked(self, backend):
+        # The studio has no count to fall short of, but it does have a fixed
+        # roster; a fixture that was never drawn cannot collide with anything.
+        c = ps._Compose()
+        hits = c.completeness_violations(
+            [("studio fixtures", 14, 13, "missing: insert_toilet")])
+        assert len(hits) == 1 and "insert_toilet" in hits[0]
+        s = await ps.generate_studio_module(backend)
+        assert not [w for w in s.payload["warnings"] if w.startswith("incomplete:")]
+
+
 def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])
     dy = min(a[3], b[3]) - max(a[1], b[1])

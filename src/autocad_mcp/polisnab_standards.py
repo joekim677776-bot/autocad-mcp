@@ -2160,13 +2160,41 @@ class _Compose:
                     f"- the room is open there")
         return out
 
-    def audit(self, exclude=(), open_sides=()):
-        """Run every collision family and return (warnings, verified).
+    def completeness_violations(self, shortfalls):
+        """Did the room actually get what was ORDERED?
+
+        The other families all ask some version of "is something in the way?".
+        This one asks whether the thing that was asked for is there at all, and
+        it exists because a room that quietly came out smaller than ordered
+        passes every collision check with flying colours — there is simply less
+        geometry to collide. A dormitory that dropped both bed pairs for lack of
+        floor reported verified=True with zero beds in it.
+
+        ``shortfalls`` is a list of (what, requested, placed, reason). Only a
+        genuine shortfall is reported; placing MORE than asked is not a thing
+        any generator here can do.
+
+        The reason travels with the count on purpose. "3 of 4 beds" tells you
+        something is wrong; "no floor left between the door swing and the
+        lockers" tells you whether to move the door, drop a bed or turn the room
+        — and that is the decision the caller actually has to make.
+        """
+        out = []
+        for what, requested, placed, reason in shortfalls:
+            if placed >= requested:
+                continue
+            out.append(f"incomplete: {what} - {placed} of {requested} placed "
+                       f"({reason})")
+        return out
+
+    def audit(self, exclude=(), open_sides=(), shortfalls=()):
+        """Run every check family and return (warnings, verified).
         ``verified`` is False if ANY family reported anything."""
         w = (self.intersections(exclude=exclude)
              + self.swing_collisions(exclude=exclude)
              + self.clearance_violations(exclude=exclude)
-             + self.open_side_violations(open_sides))
+             + self.open_side_violations(open_sides)
+             + self.completeness_violations(shortfalls))
         return w, (len(w) == 0)
 
     def result(self, **extra) -> CommandResult:
@@ -2390,14 +2418,12 @@ async def generate_dormitory_room(
     #    the inner face IS the outer corner, and an offset of t would leave a
     #    150 mm dead strip beside the lockers.
     lock_cw, lock_depth, lock_n = 600.0, 420.0, 2
-    lock_off = side_t["W"]
     lockkw = {k: v for k, v in modkw.items() if k != "side_thickness"}
-    c.add("insert_locker_row[SW]",
-          await insert_locker_row(backend, "S", lock_off, lock_cw, lock_depth, lock_n,
-                                  label="ЛОКЕРЫ", **lockkw))
-    c.add("insert_locker_row[NW]",
-          await insert_locker_row(backend, "N", lock_off, lock_cw, lock_depth, lock_n,
-                                  label="ЛОКЕРЫ", **lockkw))
+    lock_off = side_t["W"]
+    for wall in ("S", "N"):
+        c.add(f"insert_locker_row[{wall}W]",
+              await insert_locker_row(backend, wall, lock_off, lock_cw, lock_depth,
+                                      lock_n, label="ЛОКЕРЫ", **lockkw))
 
     # 4) Bed pair(s) by the east wall — head-to-east (rot -90). A pair is a
     #    south + north bed sharing an X range, kept apart by a clear GAP, not a
@@ -2405,8 +2431,8 @@ async def generate_dormitory_room(
     #    against a wall only need air between them. Successive pairs (one behind
     #    another along the wall) are likewise gap-separated, never touching.
     bed_len, bed_w = 2000.0, 825.0   # must track insert_bed single (825x2000)
-    head_clear = 50.0            # bed head off the east (window) wall
-    pair_gap_x = 400.0          # clear gap between successive pairs
+    head_clear = 50.0            # bed head off the wall it faces
+    pair_gap_x = 400.0          # clear gap between successive beds in a row
     # Each row sits FLUSH against its long wall: the bed's outer (wall-side) edge
     # is on the wall's inner face, 0 mm gap. The earlier code CENTRED the two-bed
     # stack (leaving a y_margin gap on both walls) — that centring, not the bed
@@ -2417,17 +2443,25 @@ async def generate_dormitory_room(
     n_req = max(1, int(bed_pairs))
     placed = 0
     warnings: list[str] = []
+    reason = ""
     for k in range(n_req):
         head_x = ix1 - head_clear - k * (bed_len + pair_gap_x)
         foot_x = head_x - bed_len
         if foot_x < ix0 + 300.0:             # would run into the lockers / west wall
-            warnings.append(
-                f"bed_pair {k + 1} omitted: no floor left (foot_x={foot_x:.0f} mm).")
+            reason = (f"bed_pair {k + 1} has no floor left (foot_x={foot_x:.0f} mm, "
+                      f"needs {ix0 + 300.0:.0f})")
             break
         cx = head_x - bed_len / 2.0
         c.add(f"insert_bed[{k + 1}S]", await insert_bed(backend, cx, sy, -90.0, "single"))
         c.add(f"insert_bed[{k + 1}N]", await insert_bed(backend, cx, ny, -90.0, "single"))
         placed += 1
+
+    # Completeness: the room was ordered N pairs and may have got fewer. This is
+    # its own family, not a collision — see _Compose.completeness_violations.
+    beds_req, beds_got = 2 * n_req, 2 * placed
+    shortfalls = []
+    if beds_got < beds_req:
+        shortfalls.append(("beds", beds_req, beds_got, reason))
 
     # Automatic collision guard (replaces the old "bed_pairs>1 unverified" gate).
     # Two families, both fatal to `verified`:
@@ -2458,7 +2492,8 @@ async def generate_dormitory_room(
         open_sides.append(("draw_module_outline:wall[E]",
                            (ox + L, iy0, ox + L + tp, iy1)))
     audit_warnings, verified = c.audit(exclude={"draw_module_outline"},
-                                       open_sides=open_sides)
+                                       open_sides=open_sides,
+                                       shortfalls=shortfalls)
     warnings.extend(audit_warnings)
     # An opening on a party wall is geometrically fine and architecturally wrong:
     # a window would look into the neighbour's room, and insert_exterior_door
@@ -2475,6 +2510,7 @@ async def generate_dormitory_room(
                     origin=[ox, oy], outer=[ox, oy, ox + L, oy + W],
                     wall_thickness=t, side_thickness=side_t,
                     inner=[ix0, iy0, ix1, iy1], bed_pairs_placed=placed,
+                    beds_placed=beds_got, beds_requested=beds_req,
                     verified=verified, warnings=warnings)
 
 
@@ -2723,8 +2759,25 @@ async def generate_studio_module(
     if side_t["E"] <= 0.0:
         open_sides.append(("draw_module_outline:wall[E]",
                            (ox + L, iy0, ox + L + tp, iy1)))
+    # Completeness. The studio has no count to fall short of the way bed_pairs
+    # does, but its roster IS fixed, so the failure mode is a sub-generator that
+    # returns ok:true having drawn nothing. Checking the roster against what
+    # actually reached the box list catches that; without it a studio missing
+    # its toilet passes every collision check, because a fixture that was never
+    # drawn cannot collide with anything.
+    roster = ("insert_exterior_door", "insert_window", "insert_bed",
+              "insert_nightstand", "insert_convector", "insert_table",
+              "insert_chair", "insert_wardrobe", "insert_electrical_panel",
+              "insert_interior_wall[san_S]", "insert_interior_wall[san_N]",
+              "insert_shower", "insert_sink", "insert_toilet")
+    drawn = {n for n, _ in c.boxes}
+    missing = [n for n in roster if n not in drawn]
+    shortfalls = []
+    if missing:
+        shortfalls.append(("studio fixtures", len(roster), len(roster) - len(missing),
+                           "missing: " + ", ".join(missing)))
     audit_warnings, _ = c.audit(exclude={"draw_module_outline"},
-                                open_sides=open_sides)
+                                open_sides=open_sides, shortfalls=shortfalls)
     warnings = list(audit_warnings)
     warnings.append("Studio layout is a packed, verified=False-by-design "
                     "combination (double bed + enclosed санузел + engineering "

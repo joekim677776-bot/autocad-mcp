@@ -658,9 +658,33 @@ async def polisnab(
                         series (="arctic"). This is a NEW, not-yet-live-verified
                         combination — always returned verified=False; confirm by
                         screenshot before treating it as final.
-    Both return a payload with per-step ok/error, an `entities` total, a
-    `verified` flag and `warnings`. verified=false means the geometry has not
-    been eyeballed live yet — check the screenshot before trusting it.
+    Both accept origin_x / origin_y (default 0,0): the world position of the
+    module's SW OUTER corner. The whole room — shell, openings, furniture and
+    the ВХОД/ОКНО/ЛОКЕРЫ tags — translates rigidly, so several rooms can be
+    placed on ONE drawing to assemble a multi-room complex. Pass the previous
+    rooms' payloads as `scene` (a list) so each new room is collision-checked
+    against what is already on the sheet, not only against its own contents.
+
+    Rows of rooms (Phase 4b step 3) — generate_dormitory_room also takes
+    wall_west / wall_east, which say what to build on the two SHORT end walls:
+      true      — a full insulated envelope wall (the real end of the building);
+      "party"   — the wall SHARED with the room next door, drawn at
+                  party_wall_thickness_mm (default 100: an internal wall between
+                  two heated rooms, so neither the 150 mm arctic envelope nor the
+                  75 mm санузел partition);
+      false     — not drawn; the neighbour on that side owns this boundary.
+    The rule for a row of n rooms tiled west→east at pitch length_mm: room 0 gets
+    {wall_west: true, wall_east: "party"}, the middle ones {false, "party"}, the
+    last {false, true}. Drawn this way the boundary between two neighbours is ONE
+    wall instead of two 150 mm envelopes face to face, and the pitch is unchanged.
+    A wall that is not drawn cannot take an opening — door_wall / window_wall
+    pointing at one is rejected outright.
+
+    Both return a payload with per-step ok/error, an `entities` total, the room's
+    world `bbox` / `outer` / `inner` boxes, per-side `side_thickness`, the
+    `wall_bands` actually drawn, a `verified` flag and `warnings`. verified=false
+    means a check failed OR the geometry has not been eyeballed live yet — read
+    the warnings and check the screenshot before trusting it.
     """
     from autocad_mcp import polisnab_standards as ps
 
@@ -787,12 +811,31 @@ async def polisnab(
             backend,
             length_mm=d.get("length_mm", 6000.0), width_mm=d.get("width_mm", 2400.0),
             series=d.get("series", "arctic"), bed_pairs=d.get("bed_pairs", 1),
+            origin_x=d.get("origin_x", 0.0), origin_y=d.get("origin_y", 0.0),
+            scene=d.get("scene"),
+            door_wall=d.get("door_wall", "W"), door_swing=d.get("door_swing", "out"),
+            door_offset_mm=d.get("door_offset_mm"),
+            window_wall=d.get("window_wall", "E"),
+            window_offset_mm=d.get("window_offset_mm"),
+            wall_west=d.get("wall_west", True), wall_east=d.get("wall_east", True),
+            party_wall_thickness_mm=d.get("party_wall_thickness_mm"),
+        )
+    elif operation == "insert_corridor":
+        result = await ps.insert_corridor(
+            backend, d.get("origin_x", 0.0), d.get("origin_y", 0.0),
+            d.get("length_mm", 6000.0), d.get("width_mm", ps.CORRIDOR_WIDTH),
+            label=d.get("label"), series=d.get("series"),
+            wall_thickness_mm=d.get("wall_thickness_mm"),
+            wall_south=d.get("wall_south", True),
+            wall_north=d.get("wall_north", False),
         )
     elif operation == "generate_studio_module":
         result = await ps.generate_studio_module(
             backend,
             length_mm=d.get("length_mm", 6000.0), width_mm=d.get("width_mm", 2400.0),
             series=d.get("series", "arctic"),
+            origin_x=d.get("origin_x", 0.0), origin_y=d.get("origin_y", 0.0),
+            scene=d.get("scene"),
         )
     else:
         return _json({"error": f"Unknown polisnab operation: {operation}"})

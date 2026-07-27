@@ -285,6 +285,29 @@ def _side_offset_geom(side, ox, oy, L, W, t, side_thickness=None):
     return (sx, sy), (ux, uy), (nx, ny), Ls, fill, (t0, t1)
 
 
+def _free_runs(lo, hi, band_lo, band_hi, obstacles, axis):
+    """Stretches of [lo, hi] along ``axis`` that nothing already occupies, for a
+    strip whose perpendicular extent is [band_lo, band_hi].
+
+    ``axis`` is 0 for X, 1 for Y. ``obstacles`` is a list of (name, AABB) — the
+    same boxes and swing sectors the collision families are fed, which is the
+    point: furniture is PLACED against the geometry the checks will judge it by,
+    instead of being placed by a formula and judged afterwards. Before this, a
+    bed row tiled from the far wall on the assumption that its frontage was free
+    and only found out from the swing check that the entrance was standing in
+    it.
+
+    Touching counts as free (a bed may sit flush against a locker bank); only a
+    real overlap of the perpendicular band takes frontage out."""
+    taken = []
+    for _, b in obstacles:
+        p0, p1 = (b[0], b[2]) if axis == 0 else (b[1], b[3])
+        q0, q1 = (b[1], b[3]) if axis == 0 else (b[0], b[2])
+        if q1 > band_lo + 1e-6 and q0 < band_hi - 1e-6:
+            taken.append((p0, p1))
+    return _subtract_gaps(lo, hi, taken)
+
+
 def _wall_band_aabb(side, ox, oy, L, W, t):
     """World AABB of one wall band of a module envelope, at its FULL outer extent
     (corners included — the neighbouring sides overlap it there, which is what a
@@ -2438,30 +2461,46 @@ async def generate_dormitory_room(
     # stack (leaving a y_margin gap on both walls) — that centring, not the bed
     # width, was the source of the visible wall gap. With bed_w=825 the leftover
     # central aisle is inner_h - 2*bed_w = 450 mm (auto, was the old bed_gap_y).
-    sy = iy0 + bed_w / 2.0        # south bed: outer (-Y) edge flush to iy0
-    ny = iy1 - bed_w / 2.0        # north bed: outer (+Y) edge flush to iy1
+    # Each row is tiled into the frontage that is MEASURED to be free, from the
+    # far end back. The old code computed positions from ix1 by formula and
+    # assumed the wall was clear; with the entrance on a long wall (the corridor
+    # scheme) it is not, and a bed was drawn straight through the door swing —
+    # 875x825 mm of it. Reserving the door's frontage is the same rule the
+    # lockers already followed ("its frontage is taken"), applied to the beds.
     n_req = max(1, int(bed_pairs))
-    placed = 0
     warnings: list[str] = []
-    reason = ""
-    for k in range(n_req):
-        head_x = ix1 - head_clear - k * (bed_len + pair_gap_x)
-        foot_x = head_x - bed_len
-        if foot_x < ix0 + 300.0:             # would run into the lockers / west wall
-            reason = (f"bed_pair {k + 1} has no floor left (foot_x={foot_x:.0f} mm, "
-                      f"needs {ix0 + 300.0:.0f})")
-            break
-        cx = head_x - bed_len / 2.0
-        c.add(f"insert_bed[{k + 1}S]", await insert_bed(backend, cx, sy, -90.0, "single"))
-        c.add(f"insert_bed[{k + 1}N]", await insert_bed(backend, cx, ny, -90.0, "single"))
-        placed += 1
+    rows = ((iy0 + bed_w / 2.0, "S"), (iy1 - bed_w / 2.0, "N"))
+    per_row = []
+    for centre, tag in rows:
+        band_lo, band_hi = centre - bed_w / 2.0, centre + bed_w / 2.0
+        obstacles = ([(n, b) for n, b in c.boxes if n != "draw_module_outline"]
+                     + list(c.swings))
+        n_here = 0
+        for run_lo, run_hi in reversed(_free_runs(ix0, ix1, band_lo, band_hi,
+                                                  obstacles, 0)):
+            head = run_hi - head_clear
+            while n_here < n_req and head - bed_len >= run_lo - 1e-6:
+                foot = head - bed_len
+                mid = (head + foot) / 2.0
+                c.add(f"insert_bed[{n_here + 1}{tag}]",
+                      await insert_bed(backend, mid, centre, -90.0, "single"))
+                n_here += 1
+                head = foot - pair_gap_x
+            if n_here >= n_req:
+                break
+        per_row.append((tag, n_here))
+    placed = min(n for _, n in per_row)
 
     # Completeness: the room was ordered N pairs and may have got fewer. This is
     # its own family, not a collision — see _Compose.completeness_violations.
-    beds_req, beds_got = 2 * n_req, 2 * placed
+    beds_req, beds_got = 2 * n_req, sum(n for _, n in per_row)
     shortfalls = []
     if beds_got < beds_req:
-        shortfalls.append(("beds", beds_req, beds_got, reason))
+        detail = ", ".join(f"{tag} row {n}/{n_req}" for tag, n in per_row)
+        shortfalls.append((
+            "beds", beds_req, beds_got,
+            f"{detail}; a {bed_len:.0f} mm bed needs that much clear frontage "
+            f"and the door swing, the lockers and the end walls take the rest"))
 
     # Automatic collision guard (replaces the old "bed_pairs>1 unverified" gate).
     # Two families, both fatal to `verified`:

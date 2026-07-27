@@ -1084,6 +1084,13 @@ class TestCompleteness:
         assert len(inc) == 1, r.payload["warnings"]
         assert "0 of 4 placed" in inc[0]
 
+    async def test_reason_travels_with_the_count(self, backend):
+        # "3 of 4" says something is wrong; the reason says what to do about it.
+        r = await ps.generate_dormitory_room(
+            backend, 6000.0, 2400.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        inc = [w for w in r.payload["warnings"] if w.startswith("incomplete:")]
+        assert inc and "S row 1/2" in inc[0] and "N row 2/2" in inc[0], inc
+
     async def test_a_complete_room_says_nothing(self, backend):
         # Discriminating, not always-on.
         r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 2)
@@ -1099,6 +1106,46 @@ class TestCompleteness:
         assert len(hits) == 1 and "insert_toilet" in hits[0]
         s = await ps.generate_studio_module(backend)
         assert not [w for w in s.payload["warnings"] if w.startswith("incomplete:")]
+
+
+class TestFourBedsOnACorridor:
+    """Phase 4b (2026-07-28): the bug the rotation diagnostic turned up.
+
+    6000x2400 + bed_pairs=2 + a door onto the corridor drew a bed straight
+    through the entrance's swing - 875x825 mm of overlap. Never caught, because
+    bed_pairs=2 was only ever tested with the default west door and the corridor
+    scheme only ever with bed_pairs=1.
+    """
+
+    async def test_no_bed_in_the_door_swing(self, backend):
+        r = await ps.generate_dormitory_room(
+            backend, 6000.0, 2400.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        assert not [w for w in r.payload["warnings"]
+                    if w.startswith("door_swing_collision:")], r.payload["warnings"]
+        swing = {n: b for n, *b in r.payload["swings"]}["insert_exterior_door"]
+        for name, *box in r.payload["boxes"]:
+            if name.startswith("insert_bed"):
+                assert not _boxes_overlap_simple(swing, box), name
+
+    async def test_the_door_row_loses_a_bed_and_says_so(self, backend):
+        # Fixing the collision does not conjure floor space: with the entrance
+        # mid-wall and the lockers at the other end, the south row holds one bed.
+        # The honest outcome is 3 of 4 reported, not 4 drawn through the door.
+        r = await ps.generate_dormitory_room(
+            backend, 6000.0, 2400.0, "arctic", bed_pairs=2, **CORRIDOR_KW)
+        assert r.payload["beds_placed"] == 3
+        assert r.payload["verified"] is False
+        assert any(w.startswith("incomplete:") for w in r.payload["warnings"])
+
+    async def test_the_default_west_door_is_untouched(self, backend):
+        # The historical layout must not have moved by a millimetre.
+        r = await ps.generate_dormitory_room(backend, 6000.0, 2400.0, "arctic", 2)
+        boxes = {n: b for n, *b in r.payload["boxes"]}
+        assert boxes["insert_bed[1S]"] == pytest.approx([3800.0, 150.0, 5800.0, 975.0])
+        assert boxes["insert_bed[2S]"] == pytest.approx([1400.0, 150.0, 3400.0, 975.0])
+        assert boxes["insert_bed[1N]"] == pytest.approx([3800.0, 1425.0, 5800.0, 2250.0])
+        assert boxes["insert_bed[2N]"] == pytest.approx([1400.0, 1425.0, 3400.0, 2250.0])
+        assert r.payload["verified"] is True
 
 
 def _boxes_overlap_simple(a, b):

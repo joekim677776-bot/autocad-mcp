@@ -684,6 +684,12 @@ async def polisnab(
     of the room's clear interior and checked as annotation like every other tag.
     It is never derived — only the caller assembling the building knows it.
 
+    insert_corridor takes end_west / end_east: null (left open, the default and
+    still the right answer while the layout is undecided), "wall" (solid) or
+    "door" (an end_door_width_mm opening plus a leaf that swings AWAY from the
+    corridor, the direction of egress). Sealing both ends with no door is
+    reported in warnings.
+
     Both return a payload with per-step ok/error, an `entities` total, the room's
     world `bbox` / `outer` / `inner` boxes, per-side `side_thickness`, the
     `wall_bands` actually drawn, a `verified` flag and `warnings`. verified=false
@@ -833,6 +839,8 @@ async def polisnab(
             wall_thickness_mm=d.get("wall_thickness_mm"),
             wall_south=d.get("wall_south", True),
             wall_north=d.get("wall_north", False),
+            end_west=d.get("end_west"), end_east=d.get("end_east"),
+            end_door_width_mm=d.get("end_door_width_mm", 950.0),
         )
     elif operation == "generate_studio_module":
         result = await ps.generate_studio_module(

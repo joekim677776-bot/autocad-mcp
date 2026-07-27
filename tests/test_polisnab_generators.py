@@ -904,6 +904,86 @@ class TestRoomNumber:
         assert len(hits) == 1 and "insert_room_number" in hits[0], hits
 
 
+class TestCorridorEnds:
+    """Phase 4b (2026-07-27): corridor ends become statable, NOT closed.
+
+    The step-1 reasoning stands - a blank wall across an escape route
+    misinforms while nobody knows what is really at the end - so the default is
+    still 'not drawn'. What changes is that a caller who DOES know can say so.
+    """
+
+    async def _corridor(self, backend, **kw):
+        return await ps.insert_corridor(backend, 0.0, 0.0, 12000.0, 2500.0,
+                                        series="arctic", wall_south=False,
+                                        wall_north=False, **kw)
+
+    async def test_default_is_still_open(self, backend):
+        r = await self._corridor(backend)
+        assert r.payload["ends"] == {"W": None, "E": None}
+        assert r.payload["boxes"] == []
+        assert r.payload["swings"] == []
+
+    async def test_solid_end_is_a_band_outside_the_passage(self, backend):
+        r = await self._corridor(backend, end_west="wall")
+        boxes = {n: b for n, *b in r.payload["boxes"]}
+        assert boxes["insert_corridor:end[W]"] == [-150.0, 0.0, 0.0, 2500.0]
+        # Outside the clear length, so the passage rect is untouched by it.
+        passage = r.payload["clearances"][0][1:5]
+        assert not _boxes_overlap_simple(boxes["insert_corridor:end[W]"], passage)
+
+    async def test_door_end_leaves_a_hole_and_swings_outward(self, backend):
+        r = await self._corridor(backend, end_east="door")
+        boxes = {n: b for n, *b in r.payload["boxes"]}
+        # Two band segments with a 950 gap between them, centred on the passage.
+        assert boxes["insert_corridor:end[E1]"] == [12000.0, 0.0, 12150.0, 775.0]
+        assert boxes["insert_corridor:end[E2]"] == [12000.0, 1725.0, 12150.0, 2500.0]
+        opening = {n: b for n, *b in r.payload["openings"]}
+        assert opening["insert_corridor:end_opening[E]"] == \
+            [12000.0, 775.0, 12150.0, 1725.0]
+        # The leaf sweeps AWAY from the corridor - egress direction - so the
+        # sector is entirely east of the passage.
+        swing = {n: b for n, *b in r.payload["swings"]}["insert_corridor:end_door[E]"]
+        assert swing[0] >= 12150.0
+        assert not _boxes_overlap_simple(swing, r.payload["clearances"][0][1:5])
+
+    async def test_end_geometry_is_visible_to_the_checks(self, backend):
+        # Not just drawn: an absorbed corridor's end wall and end door take part
+        # in the collision families like anything else.
+        r = await self._corridor(backend, end_west="wall", end_east="door")
+        c = ps._Compose()
+        c.absorb([r.payload])
+        assert c.clearance_violations() == []          # nothing intrudes
+        names = [n for n, _ in c.ext_boxes]
+        assert any("end[W]" in n for n in names), names
+        assert any("end_door[E]" in n for n, _ in c.ext_swings)
+        # The end band is published as a wall band, so a room butted against the
+        # corridor end can prove the wall it declined to draw is really there.
+        assert any(b == (-150.0, 0.0, 0.0, 2500.0) for _, b in c.ext_wall_bands)
+
+    async def test_inward_leaf_would_block_the_passage(self, backend):
+        # Why the leaf faces out, asserted rather than asserted-in-prose: the
+        # same door turned round is a clearance violation.
+        r = await self._corridor(backend)
+        c = ps._Compose()
+        c.absorb([r.payload])
+        c.swings = [("end_door_turned_inward", (11050.0, 775.0, 12000.0, 1725.0))]
+        hits = c.clearance_violations()
+        assert len(hits) == 1 and hits[0].startswith("clearance_blocked:"), hits
+
+    async def test_sealing_both_ends_is_reported(self, backend):
+        r = await self._corridor(backend, end_west="wall", end_east="wall")
+        assert r.ok
+        assert any("nobody can leave" in w for w in r.payload["warnings"]), \
+            r.payload["warnings"]
+        # One door is enough to make it a route again.
+        ok = await self._corridor(backend, end_west="wall", end_east="door")
+        assert ok.payload["warnings"] == []
+
+    async def test_unknown_end_value_is_rejected(self, backend):
+        with pytest.raises(ValueError):
+            await self._corridor(backend, end_west="hatch")
+
+
 def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])
     dy = min(a[3], b[3]) - max(a[1], b[1])

@@ -819,12 +819,68 @@ async def _draw_wall_band(d, x0, y0, x1, y1):
     await d.line(x0, y1, x1, y1, AR_WALL_LAYER)
 
 
+def _resolve_corridor_end(argname, flag):
+    """Resolve an ``end_west`` / ``end_east`` flag to one of None / "wall" /
+    "door"."""
+    if flag is None or flag is False:
+        return None
+    key = str(flag).strip().lower()
+    if key in ("wall", "solid", "blank", "true"):
+        return "wall"
+    if key in ("door", "exit", "opening"):
+        return "door"
+    if key in ("none", "false", "open"):
+        return None
+    raise ValueError(
+        f"{argname}={flag!r}: use None/False (left open), 'wall' (solid) or "
+        f"'door' (an opening with a leaf)")
+
+
+async def _draw_corridor_end(d, mode, x0, x1, y_lo, y_hi, passage_lo, passage_hi,
+                             door_w, outward):
+    """Draw one end of a corridor across its width and report what it means to
+    the checks.
+
+    Returns (bands, swing, opening) where ``bands`` is the list of drawn wall
+    AABBs, ``swing`` the leaf's swept AABB (or None) and ``opening`` the hole
+    rect (or None).
+
+    The leaf hinges on the OUTER face and opens AWAY from the corridor, because
+    a door at the end of a circulation route is an exit and a door on an escape
+    route opens in the direction of travel. It also keeps the swept sector out
+    of the passage, which the clearance check would otherwise report — turn the
+    leaf around and it fires, which is the check having teeth rather than the
+    geometry being lucky."""
+    if mode == "wall":
+        await _draw_wall_band(d, x0, y_lo, x1, y_hi)
+        return [(x0, y_lo, x1, y_hi)], None, None
+
+    # "door": the opening is centred on the CLEAR passage, not on the band, so
+    # it stays centred whether or not the side walls are drawn.
+    mid = (passage_lo + passage_hi) / 2.0
+    dw = min(float(door_w), passage_hi - passage_lo)
+    d_lo, d_hi = mid - dw / 2.0, mid + dw / 2.0
+
+    bands = []
+    for lo, hi in ((y_lo, d_lo), (d_hi, y_hi)):
+        if hi - lo > 1e-6:
+            await _draw_wall_band(d, x0, lo, x1, hi)
+            bands.append((x0, lo, x1, hi))
+    for y in (d_lo, d_hi):                       # jambs across the thickness
+        await d.line(x0, y, x1, y, AR_WALL_LAYER)
+
+    hinge = (x1, d_lo) if outward[0] > 0 else (x0, d_lo)
+    swing = await _draw_door_leaf(d, hinge, (0.0, 1.0), outward, dw)
+    return bands, tuple(swing), (min(x0, x1), d_lo, max(x0, x1), d_hi)
+
+
 async def insert_corridor(
     backend: AutoCADBackend,
     origin_x: float, origin_y: float, length_mm: float,
     width_mm: float = CORRIDOR_WIDTH, *, label: str | None = None,
     series=None, wall_thickness_mm=None,
     wall_south: bool = True, wall_north: bool = False,
+    end_west=None, end_east=None, end_door_width_mm: float = 950.0,
 ) -> CommandResult:
     """A corridor segment running along +X, its CLEAR PASSAGE ``width_mm`` wide,
     with the SW corner of that passage at (origin_x, origin_y).
@@ -864,11 +920,30 @@ async def insert_corridor(
     Use ``corridor_row_origins`` to place the rows; it encodes the arithmetic
     that keeps each row's corridor-side face exactly on the passage edge.
 
-    ENDS ARE LEFT OPEN, deliberately. A cap across the end would read as a dead
-    end, and a corridor must terminate in an exit, a stair, or more corridor —
-    none of which we know yet. On a drawing whose subject is circulation, a blank
-    wall across the escape route is worse than an unfinished edge, and it is
-    trivial to add once the complex layout says what is actually there.
+    ENDS DEFAULT TO OPEN, and that default has not changed. A cap across the end
+    reads as a dead end, and a corridor must terminate in an exit, a stair or
+    more corridor — none of which this generator can know. On a drawing whose
+    subject is circulation, a blank wall across the escape route is worse than
+    an unfinished edge. So the end is not something to "finish": it is something
+    the caller states once the complex layout says what is really there.
+
+    ``end_west`` / ``end_east`` say what that is, three states each:
+
+        None / False  — not drawn (the default, and still the honest answer when
+                        the end is where the corridor continues or where the
+                        layout has not been decided);
+        "wall"        — a solid band across the end, for a genuinely closed end;
+        "door"        — the same band with a ``end_door_width_mm`` opening cut
+                        into it plus a leaf, for an end that gives onto an exit.
+
+    A door here hinges on the OUTER face and swings AWAY from the corridor: a
+    door on an escape route opens in the direction of travel. It follows that
+    the sector stays out of the passage; turn it around and the clearance check
+    reports it.
+
+    Sealing BOTH ends with "wall" and no door is reported in ``warnings`` — that
+    is a corridor nobody can leave, and it is the one case where this generator
+    will say something rather than draw what it was told in silence.
 
     Returns a payload in the same shape the room generators emit (boxes / labels /
     swings / clearances / origin), so it can be passed straight into their
@@ -882,26 +957,65 @@ async def insert_corridor(
     Wc = float(width_mm)
     t = _resolve_wall_thickness(series, wall_thickness_mm)
 
+    ew = _resolve_corridor_end("end_west", end_west)
+    ee = _resolve_corridor_end("end_east", end_east)
+
     d = _Draw(backend, AR_WALL_LAYER)
     boxes = []
+    swings = []
+    openings = []
     if wall_south:
         await _draw_wall_band(d, cx, cy - t, cx + L, cy)
         boxes.append(["insert_corridor:wall[S]", cx, cy - t, cx + L, cy])
     if wall_north:
         await _draw_wall_band(d, cx, cy + Wc, cx + L, cy + Wc + t)
         boxes.append(["insert_corridor:wall[N]", cx, cy + Wc, cx + L, cy + Wc + t])
+
+    # Ends. The band sits OUTSIDE the clear length, exactly as the side walls sit
+    # outside the clear width, so the passage rectangle (and the clearance zone
+    # built on it) is the same whether the ends are drawn or not. It spans the
+    # side-wall bands too where those exist, so the corner is covered once.
+    y_lo = cy - (t if wall_south else 0.0)
+    y_hi = cy + Wc + (t if wall_north else 0.0)
+    for tag, mode, x0, x1, outward in (
+            ("W", ew, cx - t, cx, (-1.0, 0.0)),
+            ("E", ee, cx + L, cx + L + t, (1.0, 0.0))):
+        if mode is None:
+            continue
+        bands, swing, opening = await _draw_corridor_end(
+            d, mode, x0, x1, y_lo, y_hi, cy, cy + Wc, end_door_width_mm, outward)
+        for i, b in enumerate(bands):
+            suffix = f"[{tag}]" if len(bands) == 1 else f"[{tag}{i + 1}]"
+            boxes.append([f"insert_corridor:end{suffix}", *b])
+        if swing is not None:
+            swings.append([f"insert_corridor:end_door[{tag}]", *swing])
+        if opening is not None:
+            openings.append([f"insert_corridor:end_opening[{tag}]", *opening])
+
     if label:
         await d.mtext(cx + L / 2.0, cy + Wc / 2.0, str(label),
                       height=LABEL_HEIGHT, layer=TEXT_LAYER)
 
+    warnings = []
+    if ew == "wall" and ee == "wall":
+        warnings.append(
+            "corridor is sealed at BOTH ends with no door - nobody can leave it. "
+            "Give one end 'door', or leave it open until the layout says what is "
+            "really there.")
+
     r = d.result(origin=[cx, cy], outer=[cx, cy, cx + L, cy + Wc],
                  length=L, width=Wc, wall_thickness=t,
+                 ends={"W": ew, "E": ee}, warnings=warnings,
                  series=str(series or DEFAULT_SERIES).strip().lower())
     if r.ok:
         r.payload["boxes"] = boxes
         r.payload["labels"] = [[f"insert_corridor:label[{txt}]", *b]
                                for txt, b in d.label_boxes]
-        r.payload["swings"] = []
+        # An end door's swept sector is published like any other swing, so a
+        # leaf turned the wrong way shows up as a clearance violation instead of
+        # quietly sweeping the passage.
+        r.payload["swings"] = swings
+        r.payload["openings"] = openings
         r.payload["clearances"] = [["insert_corridor:passage", cx, cy, cx + L, cy + Wc]]
         # Same evidence draw_module_outline publishes: a room that declines to
         # draw a boundary can check a corridor wall covers it (the corridor never

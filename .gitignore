@@ -68,9 +68,12 @@ claude_desktop_config.json
 test_*.dwg
 temp_*.lsp
 
-# Generated drawing/plot artifacts from live MCP tests
-polisnab-module-test-*.dwg
-polisnab-module-test-*.pdf
+# Generated drawing/plot artifacts from live MCP runs. Broad on purpose: the
+# name of the next milestone scene is not knowable in advance (test rigs,
+# corridor blocks, whole complexes), and deciding case by case just means the
+# repo collects stray DWGs until someone notices.
+polisnab-*.dwg
+polisnab-*.pdf
 
 # CTO Library (not included in repo)
 PIDv4-CTO/

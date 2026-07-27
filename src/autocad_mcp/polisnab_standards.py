@@ -182,6 +182,28 @@ INSULATION_THICKNESS: dict[str, float] = {
 }
 DEFAULT_SERIES = "standard"
 
+# Thickness (mm) of a PARTY WALL — the single wall shared by two neighbouring
+# rooms of one row (Phase 4b step 3), as opposed to the insulated envelope.
+#
+# Why NOT the series thickness (arctic 150 / standard 75):
+#   * both sides are HEATED rooms, so the thermal job the envelope exists for
+#     (150 mm of mineral wool against a -50 C outdoor design temperature) simply
+#     does not apply here. Building it at 150 is paying for insulation between
+#     +20 C and +20 C, and on the drawing it reads as an exterior wall;
+#   * but it is not the 75 mm partition of insert_interior_wall either. That one
+#     closes a санузел off INSIDE one dwelling — one occupant, nothing to
+#     separate acoustically. This wall stands between two SLEEPING rooms of
+#     DIFFERENT residents, which is an acoustic + fire-compartment boundary;
+#   * 100 mm is the standard inter-room sandwich/frame panel of modular
+#     buildings and the next size up in the 50/80/100/150/200 panel range.
+#
+# HONESTY NOTE, same status as CORRIDOR_WIDTH: this is an engineering DEFAULT,
+# not a verified norm. СП 51.13330 asks for Rw >= 50 dB between rooms of
+# different residential cells and a 100 mm panel has NOT been checked against
+# that here. Verify (or specify a certified panel) before any real submission —
+# the number is a parameter precisely so it can be raised without a code change.
+PARTY_WALL_THICKNESS = 100.0
+
 
 def _resolve_wall_thickness(series, wall_thickness_mm) -> float:
     """Resolve the wall-band thickness: an explicit ``wall_thickness_mm`` wins,
@@ -221,21 +243,63 @@ def _wall_geometry(wall_side: str, origin, length: float, width: float):
     raise ValueError(f"Unknown wall_side: {wall_side!r} (use N/S/E/W)")
 
 
-def _side_offset_geom(side, ox, oy, L, W, t):
+# The two walls that meet a given side at the start / end of its run. S and N run
+# W->E, so they land on the W then the E wall; W and E run S->N, so they land on
+# the S then the N wall. Used to inset each side correctly at its corners when
+# the four walls are NOT all the same thickness.
+_SIDE_CORNERS = {"S": ("W", "E"), "N": ("W", "E"), "W": ("S", "N"), "E": ("S", "N")}
+
+
+def _corner_thickness(side_key, t, side_thickness):
+    """Thicknesses of the two walls meeting ``side_key``'s run at its start and
+    end corners. Falls back to ``t`` for anything ``side_thickness`` does not
+    name — i.e. the uniform-envelope behaviour."""
+    a, b = _SIDE_CORNERS[side_key]
+    st = side_thickness or {}
+    return (float(st.get(a, t)), float(st.get(b, t)))
+
+
+def _side_offset_geom(side, ox, oy, L, W, t, side_thickness=None):
     """Per-side geometry in *offset coordinates* along the wall run.
 
     Returns (start_outer_point, along_unit, inward_normal, side_length,
-    (fill_lo, fill_hi)). Offset 0 is the outer corner where the run starts;
-    depth 0 is the outer face, depth ``t`` the inner face. The outer face spans
-    offset [0, side_length]; the inner face spans [t, side_length - t] (it stops
-    short at the corners). The fill band spans the full length on S/N but only
-    [t, side_length - t] on W/E, so the four corners are covered exactly once
-    (S/N own them) — same rule as the un-cut outline.
+    (fill_lo, fill_hi), (t_start, t_end)). Offset 0 is the outer corner where the
+    run starts; depth 0 is the outer face, depth ``t`` the inner face. The outer
+    face spans offset [0, side_length]; the inner face stops short at the corners
+    by the thickness of the wall it meets there — [t_start, side_length - t_end].
+    The fill band spans the full length on S/N but only [t_start, side_length -
+    t_end] on W/E, so the four corners are covered exactly once (S/N own them) —
+    same rule as the un-cut outline.
+
+    ``side_thickness`` optionally maps "S"/"N"/"W"/"E" -> that wall's thickness,
+    for a module whose walls are NOT all the same: a PARTY wall shared with the
+    neighbouring room is thinner than the insulated envelope, and a wall the
+    neighbour owns outright is not drawn at all (thickness 0, so this side runs
+    clean through to its outer corner there). Omit it and every corner inset is
+    ``t`` — byte-identical to the uniform-wall behaviour.
     """
     (sx, sy), (ux, uy), (nx, ny), Ls = _wall_geometry(side, (ox, oy), L, W)
     key = _SIDE_ALIASES.get(str(side).strip().lower())
-    fill = (0.0, Ls) if key in ("S", "N") else (t, Ls - t)
-    return (sx, sy), (ux, uy), (nx, ny), Ls, fill
+    t0, t1 = _corner_thickness(key, t, side_thickness)
+    fill = (0.0, Ls) if key in ("S", "N") else (t0, Ls - t1)
+    return (sx, sy), (ux, uy), (nx, ny), Ls, fill, (t0, t1)
+
+
+def _wall_band_aabb(side, ox, oy, L, W, t):
+    """World AABB of one wall band of a module envelope, at its FULL outer extent
+    (corners included — the neighbouring sides overlap it there, which is what a
+    corner is). Published per drawn side so a room that declines to draw a
+    boundary can be checked against the band the neighbour really drew."""
+    key = _SIDE_ALIASES.get(str(side).strip().lower())
+    if key == "S":
+        return (ox, oy, ox + L, oy + t)
+    if key == "N":
+        return (ox, oy + W - t, ox + L, oy + W)
+    if key == "W":
+        return (ox, oy, ox + t, oy + W)
+    if key == "E":
+        return (ox + L - t, oy, ox + L, oy + W)
+    raise ValueError(f"Unknown wall_side: {side!r} (use N/S/E/W)")
 
 
 def _subtract_gaps(lo, hi, gaps):
@@ -256,13 +320,19 @@ def _subtract_gaps(lo, hi, gaps):
     return [(s, e) for s, e in intervals if e - s > 1e-6]
 
 
-async def _draw_wall_side(d, side, ox, oy, L, W, t, gaps):
+async def _draw_wall_side(d, side, ox, oy, L, W, t, gaps, side_thickness=None):
     """Draw one thick-wall side (outer + inner faces on AR-WALL, SOLID fill on
     AR-WALL-INSUL) with ``gaps`` (list of (a, b) offset spans) cut out, plus a
     jamb line across the thickness at each gap edge. Shared by the outline
-    generator and the door/opening cutters so the corner logic lives in one place."""
-    (sx, sy), (ux, uy), (nx, ny), Ls, (fill_lo, fill_hi) = _side_offset_geom(
-        side, ox, oy, L, W, t)
+    generator and the door/opening cutters so the corner logic lives in one place.
+
+    ``t`` is THIS side's own thickness; ``side_thickness`` (see _side_offset_geom)
+    supplies the neighbouring sides' thicknesses so the corner insets are right on
+    a module with mixed walls. The opening cutters must pass the SAME mapping the
+    outline was drawn with — they erase and redraw the whole side, so a mismatch
+    would rebuild that wall with the wrong corners."""
+    (sx, sy), (ux, uy), (nx, ny), Ls, (fill_lo, fill_hi), (t0, t1) = _side_offset_geom(
+        side, ox, oy, L, W, t, side_thickness)
 
     def P(off, depth):
         return (sx + ux * off + nx * depth, sy + uy * off + ny * depth)
@@ -270,7 +340,7 @@ async def _draw_wall_side(d, side, ox, oy, L, W, t, gaps):
     for s, e in _subtract_gaps(0.0, Ls, gaps):            # outer face
         a, b = P(s, 0.0), P(e, 0.0)
         await d.line(a[0], a[1], b[0], b[1], AR_WALL_LAYER)
-    for s, e in _subtract_gaps(t, Ls - t, gaps):          # inner face
+    for s, e in _subtract_gaps(t0, Ls - t1, gaps):        # inner face
         a, b = P(s, t), P(e, t)
         await d.line(a[0], a[1], b[0], b[1], AR_WALL_LAYER)
     for s, e in _subtract_gaps(fill_lo, fill_hi, gaps):   # grey body
@@ -296,6 +366,83 @@ def _rect_local(cx: float, cy: float, w: float, h: float):
         (cx - w / 2, cy - h / 2), (cx + w / 2, cy - h / 2),
         (cx + w / 2, cy + h / 2), (cx - w / 2, cy + h / 2),
     ]
+
+
+def _pts_aabb(pts):
+    """World axis-aligned bounding box (minx, miny, maxx, maxy) of a point list."""
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _rot_aabb(cx, cy, w, h, deg):
+    """AABB of a w(local X) x h(local Y) rectangle centred at (cx, cy) rotated by
+    ``deg``. Correct for any angle (min/max over the rotated corners), so it also
+    handles the ±90/180 placements used by the room generators."""
+    return _pts_aabb(_place(_rect_local(0.0, 0.0, w, h), cx, cy, deg))
+
+
+def _opening_aabb(P, a, b, t):
+    """AABB of a wall opening (door/window): the hole spans [a, b] along the wall
+    and the full thickness [0, t]. ``P(off, depth)`` is the wall's local->world map
+    (as built inside the opening cutters)."""
+    return _pts_aabb([P(a, 0.0), P(b, 0.0), P(a, t), P(b, t)])
+
+
+def _wall_row_aabb(wall_side, ox, oy, L, W, t, off_lo, off_hi, dep_lo, dep_hi):
+    """AABB of a wall-hugging footprint expressed in a wall's (offset, depth)
+    frame — used to predict a locker row's footprint the same way insert_locker_row
+    places it (depth measured from the OUTER face; a row sits at depth [t, t+d])."""
+    (sx, sy), (ux, uy), (nx, ny), _Ls, _, _ = _side_offset_geom(wall_side, ox, oy, L, W, t)
+    def P(off, dep):
+        return (sx + ux * off + nx * dep, sy + uy * off + ny * dep)
+    return _pts_aabb([P(off_lo, dep_lo), P(off_hi, dep_lo),
+                      P(off_hi, dep_hi), P(off_lo, dep_hi)])
+
+
+# Estimated glyph advance as a fraction of the text height, used to predict an
+# MTEXT label's footprint without asking AutoCAD to measure it. The dispatcher
+# draws labels with `_J _MC` (middle-centre attachment, see mcp-cmd-create-mtext),
+# so the insertion point is the CENTRE of the text, not a corner.
+#
+# 0.7 is a deliberate over-estimate for the Arial-ish POLISNAB-TB style (real
+# average advance is nearer 0.55-0.6 for Cyrillic caps). Over-estimating is the
+# safe direction: a label box that is slightly too wide reports a near-miss as a
+# clash, which a human then dismisses; too narrow silently hides a real overlap.
+LABEL_CHAR_WIDTH_FRAC = 0.7
+
+
+def _text_aabb(x: float, y: float, text: str, height: float):
+    """Approximate world AABB of an MC-anchored MTEXT label.
+
+    Width is estimated from the character count (no font metrics are available
+    across the file_ipc boundary); height is the nominal text height. Single-line
+    only — every label this module draws is a short tag with width=0 (no wrap)."""
+    w = len(str(text)) * LABEL_CHAR_WIDTH_FRAC * float(height)
+    h = float(height)
+    return (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0)
+
+
+def _sector_aabb(cx: float, cy: float, r: float, start_deg: float, end_deg: float):
+    """AABB of the circular SECTOR swept by a door leaf: the hinge point plus the
+    arc it traces. Not the arc's AABB alone — the hinge corner is part of the
+    swept region and is what makes the box meet the wall.
+
+    Sampled through the same _arc_points used to draw the swing, so the predicted
+    zone and the drawn arc can never disagree about where the door goes."""
+    return _pts_aabb([(cx, cy)] + _arc_points(cx, cy, r, start_deg, end_deg))
+
+
+def _boxes_overlap(a, b, tol: float = 1e-6):
+    """Overlap extent (dx, dy) of two AABBs, or None if they only touch/miss.
+    One definition of "overlapping" shared by every collision test below."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    dx = min(ax1, bx1) - max(ax0, bx0)
+    dy = min(ay1, by1) - max(ay0, by0)
+    if dx > tol and dy > tol:
+        return (dx, dy)
+    return None
 
 
 def _oval_local(cx: float, cy: float, rx: float, ry: float, n: int = 32):
@@ -444,6 +591,26 @@ class _Draw:
         self.layer = default_layer
         self.handles: list[str] = []
         self.error: str | None = None
+        # Axis-aligned bounding box [minx, miny, maxx, maxy] over the drawn
+        # PHYSICAL geometry. Labels (mtext) and selection windows (erase_window)
+        # are excluded — they are annotations / operations, not footprint. Used
+        # by _Compose to auto-detect element collisions after assembly.
+        self.bbox: list[float] | None = None
+        # Label footprints, tracked SEPARATELY from self.bbox on purpose. Folding
+        # a tag into its element's bbox would inflate that element (the ЛОКЕРЫ tag
+        # stands well clear of the row it names) and produce phantom furniture
+        # collisions. They are their own boxes, checked in their own right.
+        self.label_boxes: list[tuple[str, tuple]] = []
+
+    def _grow(self, pts):
+        for x, y in pts:
+            if self.bbox is None:
+                self.bbox = [x, y, x, y]
+            else:
+                if x < self.bbox[0]: self.bbox[0] = x
+                if y < self.bbox[1]: self.bbox[1] = y
+                if x > self.bbox[2]: self.bbox[2] = x
+                if y > self.bbox[3]: self.bbox[3] = y
 
     def _track(self, r: CommandResult):
         if not r.ok:
@@ -453,18 +620,22 @@ class _Draw:
             self.handles.append(r.payload["handle"])
 
     async def line(self, x1, y1, x2, y2, layer=None):
+        self._grow([(x1, y1), (x2, y2)])
         self._track(await self.b.create_line(x1, y1, x2, y2, layer or self.layer))
 
     async def poly(self, pts, closed=True, layer=None, linetype=None):
+        self._grow(pts)
         self._track(await self.b.create_polyline(pts, closed, layer or self.layer, linetype))
 
     async def solid_band(self, pts, layer=None):
         """Fill a 4-corner quad (CCW order) with a solid grey 2D SOLID — the wall
         body. Uses an entmake'd SOLID (deterministic, no hatch dialog/boundary
         detection); the crisp faces are drawn separately as lines/polylines."""
+        self._grow(pts)
         self._track(await self.b.create_solid(pts, layer or self.layer))
 
     async def circle(self, cx, cy, r, layer=None):
+        self._grow([(cx - r, cy - r), (cx + r, cy + r)])
         self._track(await self.b.create_circle(cx, cy, r, layer or self.layer))
 
     async def erase_window(self, x1, y1, x2, y2):
@@ -476,18 +647,22 @@ class _Draw:
 
     async def mtext(self, x, y, text, height=LABEL_HEIGHT, layer=None):
         # width=0 -> auto (no wrap), so short tags stay on one line.
+        self.label_boxes.append((str(text), _text_aabb(x, y, text, height)))
         self._track(await self.b.create_mtext(x, y, 0.0, text, height, layer or self.layer))
 
     def result(self, **extra) -> CommandResult:
-        payload = {"count": len(self.handles), "handles": self.handles}
-        payload.update(extra)
+        bbox = tuple(self.bbox) if self.bbox is not None else None
+        payload = {"count": len(self.handles), "handles": self.handles, "bbox": bbox,
+                   "label_bboxes": [[t, list(b)] for t, b in self.label_boxes]}
+        payload.update(extra)   # callers may override "bbox" (e.g. openings, whose
+                                # drawn geometry is the whole wall side, not the hole)
         return CommandResult(ok=self.error is None, payload=payload, error=self.error)
 
 
 async def draw_module_outline(
     backend: AutoCADBackend,
     length_mm=None, width_mm=None, wall_thickness_mm=None,
-    *, series=None, origin=None, openings=None,
+    *, series=None, origin=None, openings=None, side_thickness=None,
 ) -> CommandResult:
     """Module envelope drawn as a REAL wall: outer + inner faces on AR-WALL with
     a SOLID grey fill between them on AR-WALL-INSUL — the double-line + hatch
@@ -503,6 +678,24 @@ async def draw_module_outline(
     with jambs at its edges. This is the composable way to place several doors/
     windows at once. A door/window inserted later onto an already-drawn wall
     cuts its own hole via erase-and-redraw instead (see insert_exterior_door).
+
+    ``side_thickness`` (optional) overrides the thickness PER SIDE, as a mapping
+    "S"/"N"/"W"/"E" -> mm. Two values are special:
+      * a thinner one — a PARTY wall shared with the room next door, which is an
+        internal wall between two heated rooms and must not be built as the
+        insulated envelope (see PARTY_WALL_THICKNESS);
+      * ``0`` — that side is NOT DRAWN at all, because the neighbouring room
+        already owns the wall there. Same rule insert_corridor states for its own
+        sides: a boundary that belongs to somebody else is drawn once, by them.
+        The other three sides then run clean through to that outer corner, so no
+        stub of a missing wall is left behind.
+    The envelope rectangle ``length_mm x width_mm`` is unchanged by any of this —
+    only the band drawn inside it — so a row of rooms still tiles at pitch
+    ``length_mm`` and the INNER face moves instead (see ``inner`` in the payload).
+
+    The payload carries ``wall_bands``: ``[side, x0, y0, x1, y1]`` per side that
+    was actually drawn. That is what lets a later room prove the neighbour really
+    does own the wall it declined to draw (open-side check in _Compose).
     """
     m = DEFAULT_MODULE
     ox, oy = origin if origin is not None else m["origin"]
@@ -519,17 +712,203 @@ async def draw_module_outline(
         a = float(op["offset_mm"])
         by_side[key].append((a, a + float(op["width_mm"])))
 
+    st = {k: float(v) for k, v in (side_thickness or {}).items()}
+    ts = {side: st.get(side, t) for side in ("S", "N", "W", "E")}
+
     d = _Draw(backend, AR_WALL_LAYER)
+    bands = []
     for side in ("S", "N", "W", "E"):
-        await _draw_wall_side(d, side, ox, oy, L, W, t, by_side[side])
+        if ts[side] <= 0.0:          # the neighbour owns this boundary
+            continue
+        await _draw_wall_side(d, side, ox, oy, L, W, ts[side], by_side[side], ts)
+        bands.append([side, *_wall_band_aabb(side, ox, oy, L, W, ts[side])])
 
     outer = [(ox, oy), (ox + L, oy), (ox + L, oy + W), (ox, oy + W)]
-    inner = [(ox + t, oy + t), (ox + L - t, oy + t),
-             (ox + L - t, oy + W - t), (ox + t, oy + W - t)]
+    inner = [(ox + ts["W"], oy + ts["S"]), (ox + L - ts["E"], oy + ts["S"]),
+             (ox + L - ts["E"], oy + W - ts["N"]), (ox + ts["W"], oy + W - ts["N"])]
     return d.result(
         outer=[list(p) for p in outer], inner=[list(p) for p in inner],
-        wall_thickness=t, series=str(series or DEFAULT_SERIES).strip().lower(),
+        wall_thickness=t, wall_bands=bands,
+        side_thickness={k: ts[k] for k in ("S", "N", "W", "E")},
+        series=str(series or DEFAULT_SERIES).strip().lower(),
     )
+
+
+# Corridor clear width (mm). This is a WORKING DEFAULT, not a verified norm:
+# it is what fits two people passing plus door leaves, and it makes the arithmetic
+# of a двусторонняя scheme come out even. It has NOT been checked against СП/ГОСТ
+# evacuation-width requirements — do that before any real submission.
+CORRIDOR_WIDTH = 2500.0
+
+
+def corridor_row_origins(corridor_origin_y: float, corridor_width_mm: float,
+                         room_width_mm: float):
+    """``origin_y`` for a room row on each side of a corridor, as
+    (north_row_origin_y, south_row_origin_y).
+
+    The rule both rows obey: a row's wall ON THE CORRIDOR SIDE must BE the
+    corridor's boundary, not sit next to one. So the room's OUTER face lands
+    exactly on the passage edge and nothing is drawn twice:
+
+      * north row — its outer SOUTH face on the passage's north edge, so the
+        SW corner is at ``corridor_origin_y + corridor_width``;
+      * south row — its outer NORTH face on the passage's south edge, so the
+        SW corner is ``room_width`` BELOW the passage: ``corridor_origin_y -
+        room_width``.
+
+    Note the asymmetry in the arithmetic: origin_y is the SW corner in both
+    cases, so the north row adds the CORRIDOR width and the south row subtracts
+    the ROOM width. Getting this wrong by a wall thickness is the easy mistake
+    (the rooms would overlap the passage, or leave a sliver of dead space), and
+    it is exactly what the clearance check would catch.
+    """
+    cy = float(corridor_origin_y)
+    return (cy + float(corridor_width_mm), cy - float(room_width_mm))
+
+
+def _end_wall_thickness(argname, flag, t, party_t) -> float:
+    """Resolve a ``wall_west`` / ``wall_east`` flag to a thickness in mm:
+    True -> the envelope ``t``, "party" -> ``party_t``, False -> 0 (not drawn)."""
+    if flag is True:
+        return float(t)
+    if flag is False or flag is None:
+        return 0.0
+    key = str(flag).strip().lower()
+    if key in ("party", "shared"):
+        return float(party_t)
+    if key in ("true", "envelope", "exterior", "outer"):
+        return float(t)
+    if key in ("false", "none", "no", "neighbour", "neighbor"):
+        return 0.0
+    raise ValueError(
+        f"{argname}={flag!r}: use True (envelope wall), 'party' (shared with the "
+        f"room next door) or False (the neighbour draws it)")
+
+
+def room_row_walls(index: int, count: int) -> dict:
+    """End-wall kwargs for room ``index`` of a row of ``count`` rooms tiled
+    west→east, as ``{"wall_west": ..., "wall_east": ...}`` for
+    generate_dormitory_room.
+
+    The rule in one line: **a boundary between two rooms is drawn once, by the
+    room to its west.** So every room draws its east wall — as the insulated
+    envelope if it ends the row, as a party wall if a neighbour follows — and
+    only the first room of the row draws a west wall, because only there is west
+    the outside of the building.
+
+    This exists so the off-by-one lives in ONE place. Written out at the call
+    site it is three cases that all look plausible, and getting it wrong is
+    silent in the drawing: an extra west wall reads as the double band this whole
+    step removes, a missing one leaves the end room open to the weather (which is
+    why open_side_violations exists to catch it).
+    """
+    n = int(count)
+    i = int(index)
+    if not (0 <= i < n):
+        raise ValueError(f"room_row_walls: index {i} out of range for {n} room(s)")
+    return {"wall_west": i == 0, "wall_east": True if i == n - 1 else "party"}
+
+
+async def _draw_wall_band(d, x0, y0, x1, y1):
+    """One straight thick-wall band given its two long edges: grey SOLID fill on
+    AR-WALL-INSUL plus both faces as lines on AR-WALL. Same construction as
+    draw_module_outline / insert_interior_wall, expressed here in absolute edge
+    coordinates because a corridor wall is placed by its faces, not by an axis."""
+    await d.solid_band([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], AR_WALL_INSUL_LAYER)
+    await d.line(x0, y0, x1, y0, AR_WALL_LAYER)
+    await d.line(x0, y1, x1, y1, AR_WALL_LAYER)
+
+
+async def insert_corridor(
+    backend: AutoCADBackend,
+    origin_x: float, origin_y: float, length_mm: float,
+    width_mm: float = CORRIDOR_WIDTH, *, label: str | None = None,
+    series=None, wall_thickness_mm=None,
+    wall_south: bool = True, wall_north: bool = False,
+) -> CommandResult:
+    """A corridor segment running along +X, its CLEAR PASSAGE ``width_mm`` wide,
+    with the SW corner of that passage at (origin_x, origin_y).
+
+    Walls are drawn as REAL thick walls — outer + inner faces on AR-WALL with a
+    grey SOLID fill between them on AR-WALL-INSUL — the same construction
+    draw_module_outline and insert_interior_wall use. (Before 2026-07-24 they
+    were zero-thickness lines; the corridor read as a caption in empty space.)
+
+    WHICH SIDES GET A WALL. The rule is one line: **a side that has rooms
+    against it gets no wall here**, because those rooms already carry their own
+    wall and in a real building that wall IS the corridor's wall. Drawing one
+    too would stack two bands face to face and read as a double wall.
+
+      * single-loaded, rooms to the NORTH (Phase 4b step 1) — the defaults:
+        ``wall_south=True`` (far side, drawn), ``wall_north=False``;
+      * double-loaded, rooms BOTH sides (step 2) — ``wall_south=False,
+        wall_north=False``. A double-loaded corridor owns NO walls at all: it is
+        simply the space between two rows, and both boundaries belong to rooms;
+      * a stretch with no rooms on a side — turn that side back on.
+
+    ``width_mm`` is the CLEAR width (what matters for circulation), so the wall
+    bands are drawn OUTSIDE it: the south band spans [origin_y - t, origin_y].
+    The passage rectangle is therefore unchanged by adding walls, and so is the
+    ``clearances`` zone — the collision layer built on top of it keeps working
+    untouched.
+
+    THICKNESS. Resolved like any envelope wall (``series``: arctic 150 /
+    standard 75, or an explicit ``wall_thickness_mm``), NOT the 75 mm default of
+    insert_interior_wall. The reasoning: for as long as this wall exists it is
+    the OUTSIDE of the complex, and it needs the insulated envelope. It never
+    becomes an interior partition — when the second row of rooms arrives on the
+    far side, those rooms bring their own walls and this one is not drawn at all
+    (wall_south=False). So it is either exterior, or it is gone. Step 2 confirmed
+    this: going double-loaded removed the wall rather than thinning it.
+
+    Use ``corridor_row_origins`` to place the rows; it encodes the arithmetic
+    that keeps each row's corridor-side face exactly on the passage edge.
+
+    ENDS ARE LEFT OPEN, deliberately. A cap across the end would read as a dead
+    end, and a corridor must terminate in an exit, a stair, or more corridor —
+    none of which we know yet. On a drawing whose subject is circulation, a blank
+    wall across the escape route is worse than an unfinished edge, and it is
+    trivial to add once the complex layout says what is actually there.
+
+    Returns a payload in the same shape the room generators emit (boxes / labels /
+    swings / clearances / origin), so it can be passed straight into their
+    ``scene`` argument. The wall bands ARE registered as obstruction boxes now
+    that they have real thickness.
+
+    Runs along +X only; a N-S corridor is not supported yet.
+    """
+    cx, cy = float(origin_x), float(origin_y)
+    L = float(length_mm)
+    Wc = float(width_mm)
+    t = _resolve_wall_thickness(series, wall_thickness_mm)
+
+    d = _Draw(backend, AR_WALL_LAYER)
+    boxes = []
+    if wall_south:
+        await _draw_wall_band(d, cx, cy - t, cx + L, cy)
+        boxes.append(["insert_corridor:wall[S]", cx, cy - t, cx + L, cy])
+    if wall_north:
+        await _draw_wall_band(d, cx, cy + Wc, cx + L, cy + Wc + t)
+        boxes.append(["insert_corridor:wall[N]", cx, cy + Wc, cx + L, cy + Wc + t])
+    if label:
+        await d.mtext(cx + L / 2.0, cy + Wc / 2.0, str(label),
+                      height=LABEL_HEIGHT, layer=TEXT_LAYER)
+
+    r = d.result(origin=[cx, cy], outer=[cx, cy, cx + L, cy + Wc],
+                 length=L, width=Wc, wall_thickness=t,
+                 series=str(series or DEFAULT_SERIES).strip().lower())
+    if r.ok:
+        r.payload["boxes"] = boxes
+        r.payload["labels"] = [[f"insert_corridor:label[{txt}]", *b]
+                               for txt, b in d.label_boxes]
+        r.payload["swings"] = []
+        r.payload["clearances"] = [["insert_corridor:passage", cx, cy, cx + L, cy + Wc]]
+        # Same evidence draw_module_outline publishes: a room that declines to
+        # draw a boundary can check a corridor wall covers it (the corridor never
+        # draws one where rooms stand, but the check must not depend on that).
+        r.payload["wall_bands"] = [[n.rsplit("[", 1)[-1].rstrip("]"), *b]
+                                   for n, *b in boxes]
+    return r
 
 
 async def insert_interior_wall(
@@ -586,7 +965,11 @@ async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
     ``hinge`` is the hinge point; ``along_unit`` the unit vector along the wall
     toward the far jamb (the leaf's closed direction); ``swing_dir`` the unit
     vector the leaf opens toward. Shared by _draw_door (openings cut in the module
-    envelope) and _draw_door_symbol (doors in interior partitions)."""
+    envelope) and _draw_door_symbol (doors in interior partitions).
+
+    RETURNS the AABB of the sector the leaf sweeps, so callers can publish the
+    door's *clearance* requirement alongside its opening. The drawn arc and the
+    returned zone come from the same two angles by construction."""
     ux, uy = along_unit
     sx, sy = swing_dir
     lt = DOOR_LEAF_THICKNESS
@@ -606,6 +989,7 @@ async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width):
         sa, ea = a_u, a_s
     await d.poly(_arc_points(hinge[0], hinge[1], w, sa, ea), closed=False,
                  layer=AR_DOOR_LAYER, linetype=SWING_LINETYPE)
+    return _sector_aabb(hinge[0], hinge[1], w, sa, ea)
 
 
 async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
@@ -615,13 +999,14 @@ async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
     leaf/arc symbol into that gap). ``along_unit`` points toward the far jamb,
     ``swing_dir`` is the side the leaf opens into."""
     d = _Draw(backend, AR_DOOR_LAYER)
-    await _draw_door_leaf(d, hinge, along_unit, swing_dir, width_mm)
-    return d.result(hinge=[float(hinge[0]), float(hinge[1])], width=float(width_mm))
+    swing = await _draw_door_leaf(d, hinge, along_unit, swing_dir, width_mm)
+    return d.result(hinge=[float(hinge[0]), float(hinge[1])], width=float(width_mm),
+                    swing_bbox=list(swing))
 
 
 async def _draw_door(
     backend, *, wall_side, offset_mm, width_mm, swing, layer, label=None,
-    module_origin, module_length, module_width, wall_thickness,
+    module_origin, module_length, module_width, wall_thickness, side_thickness=None,
 ):
     """Door in a thick (two-face + fill) wall. Cuts the opening through BOTH
     faces and the grey fill by erasing the affected wall side over the opening
@@ -631,10 +1016,16 @@ async def _draw_door(
     NOTE: the cut redraws the whole affected wall side, so it composes across
     different sides but NOT with a second opening independently inserted on the
     SAME side — for several openings on one side, pass them together via
-    draw_module_outline(openings=[...])."""
+    draw_module_outline(openings=[...]).
+
+    ``side_thickness`` must be the SAME per-side mapping the outline was drawn
+    with (see draw_module_outline): the redraw rebuilds the whole side, so
+    without it a wall next to a party wall / an undrawn boundary comes back with
+    the wrong corner insets."""
     ox, oy = module_origin
     L, W, t = module_length, module_width, wall_thickness
-    (sx, sy), (ux, uy), (nx, ny), Ls, _ = _side_offset_geom(wall_side, ox, oy, L, W, t)
+    (sx, sy), (ux, uy), (nx, ny), Ls, _, _ = _side_offset_geom(
+        wall_side, ox, oy, L, W, t, side_thickness)
     a = float(offset_mm)
     w = float(width_mm)
     b = a + w
@@ -654,23 +1045,29 @@ async def _draw_door(
     c1, c2 = P(a - pad, -pad), P(b + pad, t)
     await d.erase_window(min(c1[0], c2[0]), min(c1[1], c2[1]),
                          max(c1[0], c2[0]), max(c1[1], c2[1]))
-    await _draw_wall_side(d, wall_side, ox, oy, L, W, t, [(a, b)])
+    await _draw_wall_side(d, wall_side, ox, oy, L, W, t, [(a, b)], side_thickness)
 
     # 2) Door leaf + swing arc on AR-DOOR. Inward swing hinges on the inner face
     #    and opens into the room; outward hinges on the outer face.
     inward = str(swing).strip().lower() in ("in", "inside", "internal", "i")
     sdir = (nx, ny) if inward else (-nx, -ny)
     hinge = P(a, t) if inward else P(a, 0.0)
-    await _draw_door_leaf(d, hinge, (ux, uy), sdir, w)
+    swing_box = await _draw_door_leaf(d, hinge, (ux, uy), sdir, w)
 
     await _label_opening(d, label, p1, p2, nx, ny)
-    return d.result(wall_side=str(wall_side), opening=[list(p1), list(p2)])
+    # bbox stays the OPENING rect (the hole in the wall) — that is the door's
+    # physical footprint. The swept sector is published separately as swing_bbox:
+    # it is a CLEARANCE requirement, not geometry, so it must not be folded into
+    # the footprint (that would make every door "collide" with its own room).
+    return d.result(wall_side=str(wall_side), opening=[list(p1), list(p2)],
+                    bbox=_opening_aabb(P, a, b, t), swing_bbox=list(swing_box))
 
 
 async def insert_exterior_door(
     backend: AutoCADBackend, wall_side: str, offset_mm: float,
     width_mm: float = 950.0, swing: str = "out", *, label: str | None = None,
     module_origin=None, module_length=None, module_width=None, wall_thickness=None,
+    side_thickness=None,
 ) -> CommandResult:
     """Exterior (entrance) door: cuts the thick-wall opening (both faces + fill +
     jambs) and draws the leaf + 90 deg swing arc (radius = width) on AR-DOOR.
@@ -687,6 +1084,7 @@ async def insert_exterior_door(
         module_length=module_length or m["length"],
         module_width=module_width or m["width"],
         wall_thickness=wall_thickness or m["wall_thickness"],
+        side_thickness=side_thickness,
     )
 
 
@@ -694,6 +1092,7 @@ async def insert_interior_door(
     backend: AutoCADBackend, wall_side: str, offset_mm: float,
     width_mm: float = 840.0, swing_direction: str = "in", *, label: str | None = None,
     module_origin=None, module_length=None, module_width=None, wall_thickness=None,
+    side_thickness=None,
 ) -> CommandResult:
     """Interior (room) door: same cut + leaf + swing arc symbol on AR-DOOR,
     narrower default.
@@ -710,6 +1109,7 @@ async def insert_interior_door(
         module_length=module_length or m["length"],
         module_width=module_width or m["width"],
         wall_thickness=wall_thickness or m["wall_thickness"],
+        side_thickness=side_thickness,
     )
 
 
@@ -717,6 +1117,7 @@ async def insert_window(
     backend: AutoCADBackend, wall_side: str, offset_mm: float, width_mm: float, *,
     label: str | None = None,
     module_origin=None, module_length=None, module_width=None, wall_thickness=None,
+    side_thickness=None,
 ) -> CommandResult:
     """Window in a thick (two-face + fill) wall. Same cut as a door — the opening
     is cut through BOTH faces and the grey fill (erase + redraw the side split,
@@ -739,7 +1140,8 @@ async def insert_window(
     L = module_length or m["length"]
     W = module_width or m["width"]
     t = wall_thickness or m["wall_thickness"]
-    (sx, sy), (ux, uy), (nx, ny), Ls, _ = _side_offset_geom(wall_side, ox, oy, L, W, t)
+    (sx, sy), (ux, uy), (nx, ny), Ls, _, _ = _side_offset_geom(
+        wall_side, ox, oy, L, W, t, side_thickness)
     a = float(offset_mm)
     w = float(width_mm)
     b = a + w
@@ -756,7 +1158,7 @@ async def insert_window(
     c1, c2 = P(a - pad, -pad), P(b + pad, t)
     await d.erase_window(min(c1[0], c2[0]), min(c1[1], c2[1]),
                          max(c1[0], c2[0]), max(c1[1], c2[1]))
-    await _draw_wall_side(d, wall_side, ox, oy, L, W, t, [(a, b)])
+    await _draw_wall_side(d, wall_side, ox, oy, L, W, t, [(a, b)], side_thickness)
 
     # 2) Glazing: a double line across the opening, centred in the thickness.
     g = t / 6.0
@@ -765,7 +1167,8 @@ async def insert_window(
         await d.line(s[0], s[1], e[0], e[1], AR_WIND_LAYER)
 
     await _label_opening(d, label, p1, p2, nx, ny)
-    return d.result(wall_side=str(wall_side), opening=[list(p1), list(p2)])
+    return d.result(wall_side=str(wall_side), opening=[list(p1), list(p2)],
+                    bbox=_opening_aabb(P, a, b, t))
 
 
 async def insert_bed(
@@ -774,10 +1177,14 @@ async def insert_bed(
 ) -> CommandResult:
     """Bed plan symbol on FURN, matching the reference pictogram: outer frame +
     an inset inner rectangle (the turned-down blanket) + pillow(s) at the head
-    with diagonally-folded (chamfered) inner corners. 900x2000 (single) or
-    1200x2000 (double), centred on (x_mm, y_mm); the head sits at local +Y."""
+    with diagonally-folded (chamfered) inner corners. 825x2000 (single) or
+    1200x2000 (double), centred on (x_mm, y_mm); the head sits at local +Y.
+
+    Single width is 825 mm (the real Polisnab single mattress). This is the
+    corrected true size — NOT a leftover of the earlier 1200x825 mix-up; only the
+    WIDTH changed 900->825, the length stays 2000. Double stays 1200x2000."""
     double = str(bed_type).strip().lower() in ("double", "dbl", "2", "d")
-    w = 1200.0 if double else 900.0
+    w = 1200.0 if double else 825.0
     length = 2000.0
     half_len = length / 2.0
 
@@ -1283,7 +1690,7 @@ async def insert_locker_row(
     L = module_length or m["length"]
     W = module_width or m["width"]
     t = wall_thickness or m["wall_thickness"]
-    (sx, sy), (ux, uy), (nx, ny), _Ls, _ = _side_offset_geom(wall_side, ox, oy, L, W, t)
+    (sx, sy), (ux, uy), (nx, ny), _Ls, _, _ = _side_offset_geom(wall_side, ox, oy, L, W, t)
     cw = float(cell_width_mm)
     dp = float(depth_mm)
     n = int(count)
@@ -1350,20 +1757,271 @@ class _Compose:
         self.steps: list[dict] = []
         self.error: str | None = None
         self.entities = 0
+        self.boxes: list[tuple] = []     # (step_name, aabb) physical footprints
+        # Label footprints and door-swing clearance zones are kept in their OWN
+        # lists rather than mixed into self.boxes, because the three kinds obey
+        # different collision rules:
+        #   boxes  — physical geometry; may not overlap other physical geometry.
+        #   labels — annotation; may not overlap anything (it becomes unreadable),
+        #            but does NOT obstruct a door.
+        #   swings — a clearance requirement, not an object; may not be blocked by
+        #            physical geometry, but freely passes over labels and is not
+        #            itself an obstruction to anything else.
+        #   clearances — a named volume of space that must STAY EMPTY (the corridor
+        #            passage). Violated by physical geometry and by door swings;
+        #            like swings, indifferent to labels (a tag floating in a
+        #            corridor is normal draughting, not an obstruction).
+        self.labels: list[tuple] = []
+        self.swings: list[tuple] = []
+        self.clearances: list[tuple] = []
+        # Wall bands actually DRAWN by this composite, per side. Not a collision
+        # family — the opposite: it is the evidence a room next door needs to
+        # prove that a boundary it deliberately did not draw is really walled
+        # (see open_side_violations). Kept out of self.boxes, whose entries are
+        # whole-element footprints and are excluded/aggregated by step name.
+        self.wall_bands: list[tuple] = []
+        # Elements drawn by PREVIOUS generate_* calls on the same sheet, merged in
+        # via absorb(). Held apart from the three lists above so this room's own
+        # bbox / boxes / labels / swings payload stays strictly its own — otherwise
+        # room B would report room A's footprint as part of itself, and chaining
+        # rooms would compound. They take part in the checks, nothing else.
+        self.ext_boxes: list[tuple] = []
+        self.ext_labels: list[tuple] = []
+        self.ext_swings: list[tuple] = []
+        self.ext_clearances: list[tuple] = []
+        self.ext_wall_bands: list[tuple] = []
 
     def add(self, name: str, r: CommandResult) -> CommandResult:
         cnt = None
+        bbox = None
         if isinstance(r.payload, dict):
             cnt = r.payload.get("count")
+            bbox = r.payload.get("bbox")
         self.steps.append({"step": name, "ok": r.ok, "error": r.error, "count": cnt})
         if r.ok and isinstance(cnt, int):
             self.entities += cnt
+        if r.ok and bbox is not None:
+            self.boxes.append((name, tuple(bbox)))
+        if r.ok and isinstance(r.payload, dict):
+            for text, lb in (r.payload.get("label_bboxes") or []):
+                self.labels.append((f"{name}:label[{text}]", tuple(lb)))
+            sb = r.payload.get("swing_bbox")
+            if sb is not None:
+                self.swings.append((name, tuple(sb)))
+            # A step may publish clearance zones of its own (insert_corridor does),
+            # so a composite that draws a corridor inline is checked the same way
+            # as one that receives it through `scene`.
+            for entry in (r.payload.get("clearances") or []):
+                self.clearances.append((f"{name}:{entry[0]}", tuple(entry[1:5])))
+            for entry in (r.payload.get("wall_bands") or []):
+                self.wall_bands.append((f"{name}:wall[{entry[0]}]", tuple(entry[1:5])))
         if not r.ok and self.error is None:
             self.error = f"{name}: {r.error}"
         return r
 
+    def absorb(self, scene):
+        """Merge boxes/labels/swings from ALREADY-DRAWN elements (previous
+        generate_* calls on the same drawing) so this room can be checked against
+        them. ``scene`` is a list of prior result payloads.
+
+        Names are prefixed with the source room's origin, so a warning says which
+        room the obstruction belongs to. Nothing is drawn — this only widens what
+        the checks below can see."""
+        for prev in (scene or []):
+            if not isinstance(prev, dict):
+                continue
+            o = prev.get("origin") or [0.0, 0.0]
+            tag = f"room@{float(o[0]):.0f},{float(o[1]):.0f}"
+            for key, dest in (("boxes", self.ext_boxes), ("labels", self.ext_labels),
+                              ("swings", self.ext_swings),
+                              ("clearances", self.ext_clearances),
+                              ("wall_bands", self.ext_wall_bands)):
+                for entry in (prev.get(key) or []):
+                    dest.append((f"[{tag}] {entry[0]}", tuple(entry[1:5])))
+
+    def _pairs(self, own, own_vs_ext, ext, kind):
+        """Every own-own pair plus every own-ext pair. ext-ext pairs are skipped:
+        those are two previously-drawn rooms, already audited by their own calls —
+        re-reporting them here would duplicate a warning the caller has seen.
+
+        ``own`` is the excluded-filtered list used for own-own pairing;
+        ``own_vs_ext`` is the UNFILTERED list used against foreign elements. The
+        two differ by the module shell, and the difference matters: excluding the
+        shell is right within a room (its bbox is the whole module rectangle, so
+        every bed would trivially "collide" with it) but wrong across rooms —
+        with the shell dropped, a neighbour's label landing inside THIS room goes
+        unreported, and the neighbour could not have caught it either because
+        this room did not exist when it was drawn. Blind in both directions."""
+        out = []
+        seen = set()
+        for i in range(len(own)):
+            ni, bi = own[i]
+            for nj, bj in own[i + 1:]:
+                hit = _boxes_overlap(bi, bj)
+                if hit:
+                    seen.add((ni, nj))
+                    out.append(f"{kind}: '{ni}' <-> '{nj}' "
+                               f"overlap {hit[0]:.0f}x{hit[1]:.0f} mm")
+        for ni, bi in own_vs_ext:
+            for nj, bj in ext:
+                hit = _boxes_overlap(bi, bj)
+                if hit and (ni, nj) not in seen:
+                    out.append(f"{kind}: '{ni}' <-> '{nj}' "
+                               f"overlap {hit[0]:.0f}x{hit[1]:.0f} mm")
+        return out
+
+    def intersections(self, exclude=()):
+        """Pairwise AABB-overlap check over physical geometry AND labels (the
+        module shell etc. can be named in ``exclude``). Returns a list of
+        human-readable warnings — one per overlapping pair, with the overlap
+        extent in mm. Touching edges (0 overlap) do NOT count. An empty list
+        means the scene is collision-free by this test.
+
+        Labels participate on equal footing: an unreadable overprinted tag
+        (the "ВХОДКНО" case) is a drawing defect just like clashing furniture."""
+        ex = set(exclude)
+        own_all = self.boxes + self.labels
+        own = [(n, b) for (n, b) in own_all if n not in ex]
+        ext = self.ext_boxes + self.ext_labels
+        return self._pairs(own, own_all, ext, "collision")
+
+    def swing_collisions(self, exclude=()):
+        """Door-swing clearance check: does the sector each leaf sweeps run into
+        anything physical? Reported as its own category ("door_swing_collision")
+        because the failure is different in kind from two objects occupying the
+        same space — here the geometry is fine on paper, but nobody can open the
+        door.
+
+        Scope is deliberately EVERY physical box in the scene, whether it belongs
+        to this room or to a neighbouring module merged in via ``absorb``: a leaf
+        fouling on our own bed and a leaf fouling on the module next door are the
+        same physical problem, and the leaf does not care who drew the obstacle.
+
+        Excluded from consideration:
+          * ``exclude`` (the room's own shell — its bbox is the whole module
+            rectangle, so every inward-swinging door would trivially "hit" it);
+          * the door's own opening (the hinge sits on it by definition);
+          * labels — text is not an obstruction. Without this, the ВХОД tag that
+            _label_opening deliberately parks outside the wall would fire a false
+            clash on every outward-swinging entrance ever drawn."""
+        ex = set(exclude)
+        out = []
+        # Our doors against everything physical; and previously-drawn neighbouring
+        # doors against OUR geometry (their swing may reach into this new room —
+        # that direction is invisible to the neighbour's own already-finished call).
+        for swings, obstacles in ((self.swings, self.boxes + self.ext_boxes),
+                                  (self.ext_swings, self.boxes)):
+            for dname, sbox in swings:
+                for name, box in obstacles:
+                    if name in ex or name == dname:
+                        continue
+                    hit = _boxes_overlap(sbox, box)
+                    if hit:
+                        out.append(
+                            f"door_swing_collision: '{dname}' swing is blocked by "
+                            f"'{name}' - overlap {hit[0]:.0f}x{hit[1]:.0f} mm")
+        return out
+
+    def union_bbox(self):
+        """AABB covering every element this composite drew (shell included), as
+        (minx, miny, maxx, maxy) — or None if nothing was drawn. This is the
+        room's footprint in WORLD coordinates, so a caller assembling several
+        rooms on one drawing can run the same overlap test BETWEEN rooms that
+        ``intersections`` runs between elements of one room."""
+        if not self.boxes:
+            return None
+        xs0 = [b[0] for _, b in self.boxes]
+        ys0 = [b[1] for _, b in self.boxes]
+        xs1 = [b[2] for _, b in self.boxes]
+        ys1 = [b[3] for _, b in self.boxes]
+        return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+    def clearance_violations(self, exclude=()):
+        """Zones that must stay empty (currently: the corridor passage) versus
+        anything that intrudes into them — physical geometry or a door swing.
+
+        Reported as its own category ("clearance_blocked") because the failure is
+        again different in kind: nothing collides with anything, but a route
+        stops being usable. This is what turns "the corridor is walkable end to
+        end" into a property the generator can assert.
+
+        Labels are NOT checked: a door tag or room number drawn in circulation
+        space is ordinary draughting, not an obstruction. Same rule as swings."""
+        ex = set(exclude)
+        out = []
+        all_clear = [(n, b, False) for n, b in self.clearances] + \
+                    [(n, b, True) for n, b in self.ext_clearances]
+        for cname, cbox, c_is_ext in all_clear:
+            obstacles = ([(n, b, False) for n, b in self.boxes] +
+                         [(n, b, False) for n, b in self.swings] +
+                         [(n, b, True) for n, b in self.ext_boxes] +
+                         [(n, b, True) for n, b in self.ext_swings])
+            for name, box, o_is_ext in obstacles:
+                # Skip ext-vs-ext: both were already present when the earlier call
+                # ran its own audit, so re-reporting duplicates a known warning.
+                # NOTE `exclude` is deliberately NOT applied here. The room shell
+                # is excluded elsewhere so furniture does not collide with its own
+                # envelope — but a shell overlapping the corridor passage is a room
+                # built on top of the circulation route, which is precisely the
+                # error this check exists to find.
+                if (c_is_ext and o_is_ext) or name == cname:
+                    continue
+                hit = _boxes_overlap(cbox, box)
+                if hit:
+                    out.append(
+                        f"clearance_blocked: '{cname}' is obstructed by '{name}' "
+                        f"- intrusion {hit[0]:.0f}x{hit[1]:.0f} mm")
+        return out
+
+    def open_side_violations(self, open_sides):
+        """The check that had to come WITH shared walls, not after them.
+
+        Every other family here asks "is something in the way?". This one asks
+        the opposite question, and it only became askable once a room could
+        legitimately skip a wall: **if this room did not draw a boundary because
+        the neighbour owns it, is that neighbour's wall actually there?**
+
+        Without it, ``wall_west=False`` on the FIRST room of a row (an off-by-one
+        away) leaves the module open to the outdoors and every existing check
+        still passes with flying colours — nothing overlaps, nothing is blocked,
+        there is simply no wall. Silence would be the wrong answer.
+
+        ``open_sides`` is a list of (name, strip) where ``strip`` is the AABB the
+        missing wall would have occupied. It is matched against the wall bands
+        the NEIGHBOURS published (ext_wall_bands), not against their shell
+        bboxes: a shell bbox is the whole room rectangle, so it would "cover"
+        the strip even if that neighbour skipped the very same wall — both rooms
+        pointing at each other and neither drawing anything."""
+        out = []
+        for name, strip in open_sides:
+            hit = [n for n, b in self.ext_wall_bands if _boxes_overlap(strip, b)]
+            if not hit:
+                out.append(
+                    f"open_side: '{name}' is not drawn (the neighbour is meant to "
+                    f"own it) but no neighbouring wall band covers "
+                    f"[{strip[0]:.0f},{strip[1]:.0f}]..[{strip[2]:.0f},{strip[3]:.0f}] "
+                    f"- the room is open there")
+        return out
+
+    def audit(self, exclude=(), open_sides=()):
+        """Run every collision family and return (warnings, verified).
+        ``verified`` is False if ANY family reported anything."""
+        w = (self.intersections(exclude=exclude)
+             + self.swing_collisions(exclude=exclude)
+             + self.clearance_violations(exclude=exclude)
+             + self.open_side_violations(open_sides))
+        return w, (len(w) == 0)
+
     def result(self, **extra) -> CommandResult:
-        payload = {"steps": self.steps, "entities": self.entities}
+        payload = {"steps": self.steps, "entities": self.entities,
+                   "bbox": self.union_bbox(),
+                   # Emitted so the caller can feed this room back in as `scene`
+                   # when drawing the next one on the same sheet.
+                   "boxes": [[n, *b] for n, b in self.boxes],
+                   "labels": [[n, *b] for n, b in self.labels],
+                   "swings": [[n, *b] for n, b in self.swings],
+                   "clearances": [[n, *b] for n, b in self.clearances],
+                   "wall_bands": [[n, *b] for n, b in self.wall_bands]}
         payload.update(extra)
         return CommandResult(ok=self.error is None, payload=payload, error=self.error)
 
@@ -1372,14 +2030,29 @@ async def generate_dormitory_room(
     backend: AutoCADBackend,
     length_mm: float = 6000.0, width_mm: float = 2400.0,
     series: str = "arctic", bed_pairs: int = 1,
+    origin_x: float = 0.0, origin_y: float = 0.0, scene=None,
+    door_wall: str = "W", door_swing: str = "out", door_offset_mm=None,
+    window_wall: str = "E", window_offset_mm=None,
+    wall_west=True, wall_east=True, party_wall_thickness_mm=None,
 ) -> CommandResult:
-    """4-bed dormitory (общежитие) module in one call — the layout of
-    reference-4bed-room-layout.png: standards + a real thick-wall shell, an
-    entrance door on the SOUTH wall, a window on the EAST wall, a row of lockers
-    on the WEST wall, and ``bed_pairs`` pair(s) of single beds by the EAST wall.
+    """4-bed dormitory (общежитие) module in one call. Wall layout (reworked
+    2026-07-24): standards + a real thick-wall shell, an entrance door on the
+    WEST wall, a window on the EAST wall, a row of lockers on the SOUTH wall, a
+    BLANK north wall, and ``bed_pairs`` pair(s) of single beds by the EAST wall.
+    (Earlier revisions had the door on SOUTH and lockers on WEST — no longer.)
 
-    Geometry orientation (all in the module's own frame, origin at 0,0, inner
-    faces inset by the wall thickness ``t``):
+    ``origin_x`` / ``origin_y`` place the module's SW outer corner in world
+    coordinates (default 0,0 — the historical behaviour, byte-identical output).
+    Everything the generator emits — shell, openings, furniture, the ВХОД/ОКНО/
+    ЛОКЕРЫ tags — is derived from the inner-face locals below, which are
+    themselves anchored on the origin, so the whole room translates rigidly.
+    (setup_dimstyle draws no geometry; it only sets DIMSTYLE variables, so there
+    is nothing there to translate.) The returned payload carries the room's world
+    ``bbox``, so a caller tiling several rooms can overlap-test them against each
+    other the same way _Compose overlap-tests elements within one room.
+
+    Geometry orientation (in the module's own frame, inner faces inset from the
+    origin by the wall thickness ``t``):
       * beds run head-to-EAST (toward the window wall), rotation_deg=-90 so the
         pillow end (local +Y) points +X; a pair is a south + north bed sharing an
         X range, kept apart by a clear GAP (``bed_gap_y``), NOT a partition — an
@@ -1387,15 +2060,78 @@ async def generate_dormitory_room(
         only need air between them (feedback from the first live test);
       * successive pairs (one behind another along the wall) are gap-separated
         too (``pair_gap_x``), never touching;
-      * the locker row starts at the WEST wall's inner face and its cell width is
-        shrunk to the clear inner run so no cell is buried in the S/N walls
-        (offset 0 is the OUTER corner — a full-width run sinks 1/4 of the end
-        cells into the walls; also feedback from the first live test).
+      * the locker row starts at the SOUTH wall's inner face; its cell width is
+        shrunk to the clear inner run (L - 2t) only if 4x600 would overflow — on
+        6000 it does not, so cells stay 600 (offset 0 is the OUTER corner — a
+        full-width run would sink 1/4 of the end cells into the walls).
+      NOTE: the south beds front the south wall, so a locker row centred on the
+      south wall can collide with them — see the caller/warnings.
 
     ``series`` picks the wall thickness (arctic 150 / standard 75). Door/window
-    are cut with insert_exterior_door / insert_window; they sit on DIFFERENT
+    are cut with insert_exterior_door / insert_window; they must sit on DIFFERENT
     walls so the two cuts compose cleanly (the same-side caveat in _draw_door
-    does not bite here).
+    bites if you put both on one wall).
+
+    CORRIDOR SCHEME (Phase 4b). Defaults reproduce the free-standing module: door
+    on W opening OUT (a door to the outdoors), window on E. For a room served by
+    a shared corridor, pass:
+
+        door_wall="S", door_swing="in", window_wall="N"
+
+    and the two architectural rules that go with it:
+      * a door onto a SHARED corridor must open INWARD. Outward, it blocks the
+        passage and fouls the opposite/neighbouring doors. This is the opposite
+        of the free-standing default, where "out" is right because the leaf
+        swings into open air;
+      * the window moves off the E wall, because in a row of rooms along a
+        corridor E/W are PARTY walls between neighbours and only N is exterior.
+        Leaving the window on E does not merely look wrong: its ОКНО tag is
+        drawn 250 mm beyond the wall, i.e. physically inside the next room, and
+        the label check reports it.
+    With those, a centred S door clears this layout's own furniture: the swept
+    sector lands between the SW locker bank and the south bed row. That is not
+    luck-by-design — it is asserted by the swing check, not assumed.
+
+    SHARED WALLS IN A ROW (Phase 4b step 3). ``wall_west`` / ``wall_east`` say
+    what to draw on the two SHORT end walls, in the same spirit as
+    insert_corridor's wall_south/wall_north — the boundary is drawn ONCE, by
+    whoever owns it, instead of two rooms each drawing their own and stacking two
+    bands face to face. Each takes:
+
+        True     — a full insulated envelope wall (``series`` thickness). The
+                   real outer end of the building.
+        "party"  — a PARTY wall shared with the room next door, drawn at
+                   ``party_wall_thickness_mm`` (default PARTY_WALL_THICKNESS =
+                   100 mm; see that constant for why it is neither 150 nor 75).
+        False    — not drawn at all: the neighbour on that side owns the wall.
+
+    The row rule, for ``n`` rooms tiled west→east at pitch ``length_mm``:
+
+        room 0        wall_west=True,  wall_east="party"   (its west IS the end)
+        room 1..n-2   wall_west=False, wall_east="party"
+        room n-1      wall_west=False, wall_east=True      (its east IS the end)
+        n == 1        both True — a free-standing module, the default.
+
+    ``room_row_walls(i, n)`` returns exactly that as kwargs, so a caller never
+    hand-writes the off-by-one. The PITCH IS UNCHANGED (``length_mm``, rooms
+    still tile outer-edge to outer-edge): the envelope rectangle stays L x W and
+    only the band inside it changes, so room i+1's interior begins at its own
+    outer edge and the wall to its west is room i's party band, ending 100 mm
+    earlier. One wall between the two rooms, and the total building length is the
+    same as it was with two.
+
+    Consequence to keep in mind: the INNER faces are now per-side, so rooms in
+    the middle of a row are slightly roomier (their end walls are 100/0 mm rather
+    than 150). Everything positional here is written against ix0/ix1, so the
+    furniture follows automatically — the locker rows still start at the real
+    inner west face and the beds' heads still sit 50 mm off the real inner east
+    face, wherever those have moved to.
+
+    A wall that is not drawn cannot hold an opening: ``door_wall`` / ``window_wall``
+    pointing at a False side is rejected outright (ok=False) rather than cutting
+    a hole in a wall that is not there. Pointing one at a "party" side is allowed
+    but flagged — a window into the neighbour's room is a drawing error, and an
+    entrance door through a party wall is not what insert_exterior_door draws.
 
     VERIFIED: only bed_pairs=1 (its confirmed, screenshot-checked form). For
     bed_pairs>1 the extra pairs are tiled westward by analogy and the result is
@@ -1404,55 +2140,116 @@ async def generate_dormitory_room(
     """
     L = float(length_mm)
     W = float(width_mm)
+    ox, oy = float(origin_x), float(origin_y)
     t = _resolve_wall_thickness(series, None)
-    modkw = dict(module_origin=DEFAULT_MODULE["origin"],
-                 module_length=L, module_width=W, wall_thickness=t)
-    ix0, iy0, ix1, iy1 = t, t, L - t, W - t         # inner faces (origin 0,0)
+    tp = (float(party_wall_thickness_mm) if party_wall_thickness_mm is not None
+          else PARTY_WALL_THICKNESS)
+    # Per-side thicknesses. Only the two SHORT end walls are variable: the long
+    # N/S walls are always the real envelope (one faces the corridor, the other
+    # the outdoors), it is the row direction that produces shared boundaries.
+    side_t = {"S": t, "N": t,
+              "W": _end_wall_thickness("wall_west", wall_west, t, tp),
+              "E": _end_wall_thickness("wall_east", wall_east, t, tp)}
+    modkw = dict(module_origin=(ox, oy), module_length=L, module_width=W,
+                 wall_thickness=t, side_thickness=side_t)
+    # Inner faces in WORLD coordinates. Every absolute placement below is written
+    # against these four, never against a bare t / L-t, so the origin propagates
+    # by construction instead of by remembering to add it at each call site.
+    # They are PER SIDE since step 3: an end wall may be a 100 mm party wall or
+    # (thickness 0) not this room's at all, and the furniture must follow the
+    # face that is really there.
+    ix0, iy0 = ox + side_t["W"], oy + t
+    ix1, iy1 = ox + L - side_t["E"], oy + W - t
+
+    # An opening needs a wall to be cut into. Rejected, not warned: cutting a
+    # 950 mm hole out of a wall that was never drawn produces a jamb line
+    # floating in mid-air and an ok:true result.
+    for what, side in (("door_wall", door_wall), ("window_wall", window_wall)):
+        key = _SIDE_ALIASES.get(str(side).strip().lower())
+        if key is None:
+            return CommandResult(
+                ok=False, error=f"generate_dormitory_room: unknown {what}={side!r}")
+        if side_t[key] <= 0.0:
+            return CommandResult(ok=False, error=(
+                f"generate_dormitory_room: {what}={side!r} but that wall is not "
+                f"drawn by this room (the neighbour owns it) - move the opening "
+                f"to a wall this room actually builds"))
+
     c = _Compose()
+    c.absorb(scene)
 
     # 1) Standards + thick-wall shell.
     c.add("setup_layers", await setup_layers(backend))
     c.add("setup_dimstyle", await setup_dimstyle(backend))
     c.add("draw_module_outline",
-          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series))
+          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series,
+                                    origin=(ox, oy), side_thickness=side_t))
 
-    # 2) Entrance (S) + window (E) — different walls, so the cuts compose.
+    # 2) Entrance (W) + window (E) — different walls, so the cuts compose. The
+    #    entrance was moved off the SOUTH wall to the WEST wall (S is now a blank
+    #    wall); the door is centred on the west wall (offset measured from the SW
+    #    outer corner along +Y, wall length = W), so it sits clear of both corners.
+    #    NOTE offset_mm is measured ALONG THE WALL from that wall's start corner,
+    #    not in world X/Y — the opening generators add module_origin themselves.
+    #    Do NOT add origin_x/origin_y here; that would double-shift the openings.
+    #    door_wall / window_wall pick the wall; the run length along a wall is L on
+    #    N/S and W on E/W, so centring has to ask which one it is.
+    def wall_run(side):
+        return W if _SIDE_ALIASES.get(str(side).strip().lower()) in ("W", "E") else L
+
     door_w = 950.0
-    door_off = max(0.0, min(1500.0, L / 2.0 - door_w / 2.0))
+    door_off = (float(door_offset_mm) if door_offset_mm is not None
+                else (wall_run(door_wall) - door_w) / 2.0)      # centred by default
     c.add("insert_exterior_door",
-          await insert_exterior_door(backend, "S", door_off, door_w, "out",
+          await insert_exterior_door(backend, door_wall, door_off, door_w, door_swing,
                                      label="ВХОД", **modkw))
-    win_w = min(1120.0, W - 2 * t - 200.0)
-    win_off = (W - win_w) / 2.0
+    win_w = min(1120.0, wall_run(window_wall) - 2 * t - 200.0)
+    win_off = (float(window_offset_mm) if window_offset_mm is not None
+               else (wall_run(window_wall) - win_w) / 2.0)
     c.add("insert_window",
-          await insert_window(backend, "E", win_off, win_w, label="ОКНО", **modkw))
+          await insert_window(backend, window_wall, win_off, win_w,
+                              label="ОКНО", **modkw))
 
-    # 3) Locker row on the west wall. The row must sit BETWEEN the inner faces of
-    #    the S/N walls. offset 0 is the OUTER corner, so a full-width run (count *
-    #    cw == outer length) buries a quarter of the two END cells in the walls
-    #    (150 mm of a 600 mm cell = 1/4). Start at the inner face and shrink the
-    #    cell width to the clear inner run if the requested width would overflow.
-    lock_count, lock_cw_req, lock_depth = 4, 600.0, 420.0
-    inner_run = W - 2 * t                                   # clear west-wall length
-    lock_cw = min(lock_cw_req, inner_run / lock_count)
-    lock_off = t + (inner_run - lock_count * lock_cw) / 2.0
-    c.add("insert_locker_row",
-          await insert_locker_row(backend, "W", lock_off, lock_cw, lock_depth,
-                                  lock_count, label="ЛОКЕРЫ", **modkw))
+    # 3) Lockers: TWO 2-cell banks tucked into the two WEST corners (beside the
+    #    door wall), well clear of the bed rows that front the east part of both
+    #    long walls. A single 4-cell run on one long wall would sit under that
+    #    wall's beds (its frontage is taken), so the lockers are split into the
+    #    two free corners instead:
+    #      * SW corner — south wall, west end (offset = t, flush to the inner
+    #        west-wall face);
+    #      * NW corner — north wall, west end (offset = t).
+    #    offset = t starts the first cell exactly at the inner face so no cell is
+    #    buried in the west wall. The post-assembly collision check below is the
+    #    real guard that these clear the door and the beds.
+    #    NOTE the offset is the WEST wall's own thickness, not the envelope t —
+    #    on a room whose west boundary is the neighbour's wall (side_t["W"] == 0)
+    #    the inner face IS the outer corner, and an offset of t would leave a
+    #    150 mm dead strip beside the lockers.
+    lock_cw, lock_depth, lock_n = 600.0, 420.0, 2
+    lock_off = side_t["W"]
+    lockkw = {k: v for k, v in modkw.items() if k != "side_thickness"}
+    c.add("insert_locker_row[SW]",
+          await insert_locker_row(backend, "S", lock_off, lock_cw, lock_depth, lock_n,
+                                  label="ЛОКЕРЫ", **lockkw))
+    c.add("insert_locker_row[NW]",
+          await insert_locker_row(backend, "N", lock_off, lock_cw, lock_depth, lock_n,
+                                  label="ЛОКЕРЫ", **lockkw))
 
     # 4) Bed pair(s) by the east wall — head-to-east (rot -90). A pair is a
     #    south + north bed sharing an X range, kept apart by a clear GAP, not a
     #    partition: an interior wall between beds reads as structural, and beds
     #    against a wall only need air between them. Successive pairs (one behind
     #    another along the wall) are likewise gap-separated, never touching.
-    bed_len, bed_w = 2000.0, 900.0
+    bed_len, bed_w = 2000.0, 825.0   # must track insert_bed single (825x2000)
     head_clear = 50.0            # bed head off the east (window) wall
-    bed_gap_y = 200.0           # clear gap between the S and N bed of a pair
     pair_gap_x = 400.0          # clear gap between successive pairs
-    inner_h = W - 2 * t
-    y_margin = max(0.0, (inner_h - (2 * bed_w + bed_gap_y)) / 2.0)
-    sy = iy0 + y_margin + bed_w / 2.0        # south bed centre
-    ny = iy1 - y_margin - bed_w / 2.0        # north bed centre
+    # Each row sits FLUSH against its long wall: the bed's outer (wall-side) edge
+    # is on the wall's inner face, 0 mm gap. The earlier code CENTRED the two-bed
+    # stack (leaving a y_margin gap on both walls) — that centring, not the bed
+    # width, was the source of the visible wall gap. With bed_w=825 the leftover
+    # central aisle is inner_h - 2*bed_w = 450 mm (auto, was the old bed_gap_y).
+    sy = iy0 + bed_w / 2.0        # south bed: outer (-Y) edge flush to iy0
+    ny = iy1 - bed_w / 2.0        # north bed: outer (+Y) edge flush to iy1
     n_req = max(1, int(bed_pairs))
     placed = 0
     warnings: list[str] = []
@@ -1468,21 +2265,54 @@ async def generate_dormitory_room(
         c.add(f"insert_bed[{k + 1}N]", await insert_bed(backend, cx, ny, -90.0, "single"))
         placed += 1
 
-    verified = (n_req == 1)
-    if n_req > 1:
-        warnings.append(
-            "bed_pairs>1 is NOT screenshot-verified — only bed_pairs=1 is a "
-            "confirmed live layout. The extra pairs are tiled by analogy; treat "
-            "them as a draft that needs its own visual test.")
+    # Automatic collision guard (replaces the old "bed_pairs>1 unverified" gate).
+    # Two families, both fatal to `verified`:
+    #   collision            — physical geometry or labels sharing space;
+    #   door_swing_collision — a leaf that cannot complete its travel.
+    # Covers this room's own elements plus anything merged in via `scene`.
+    #   open_side           — a boundary this room left to the neighbour, with no
+    #                         neighbouring wall actually there to take it.
+    # The strip to look in is OUTSIDE the envelope rectangle, not inside it: with
+    # this side's thickness at 0 the inner face IS the outer edge, so the wall
+    # that has to be there belongs to the neighbour and stands beyond it. (Probing
+    # inside the rectangle instead finds nothing and cries wolf on every room of
+    # a correctly-built row — the first way this was written.)
+    # The strip spans the room's CLEAR height (iy0..iy1), not the full W: the
+    # neighbour's own N and S bands run the whole length of their module and so
+    # poke into the corners of this strip. Include the corners and any neighbour
+    # at all "covers" the boundary — including one that skipped the very same
+    # wall, which is the case this check exists for.
+    open_sides = []
+    if side_t["W"] <= 0.0:
+        open_sides.append(("draw_module_outline:wall[W]", (ox - tp, iy0, ox, iy1)))
+    if side_t["E"] <= 0.0:
+        open_sides.append(("draw_module_outline:wall[E]",
+                           (ox + L, iy0, ox + L + tp, iy1)))
+    audit_warnings, verified = c.audit(exclude={"draw_module_outline"},
+                                       open_sides=open_sides)
+    warnings.extend(audit_warnings)
+    # An opening on a party wall is geometrically fine and architecturally wrong:
+    # a window would look into the neighbour's room, and insert_exterior_door
+    # draws an ENTRANCE, not a door between two rooms. Flagged, not rejected —
+    # unlike an opening on an undrawn wall, this one is at least buildable.
+    for what, side in (("door_wall", door_wall), ("window_wall", window_wall)):
+        key = _SIDE_ALIASES.get(str(side).strip().lower())
+        if side_t[key] == tp and tp != t:
+            warnings.append(f"{what}={side!r} is a PARTY wall shared with the room "
+                            f"next door - an exterior opening does not belong there.")
+            verified = False
 
     return c.result(series=str(series).strip().lower(), module=[L, W],
-                    wall_thickness=t, bed_pairs_placed=placed,
+                    origin=[ox, oy], outer=[ox, oy, ox + L, oy + W],
+                    wall_thickness=t, side_thickness=side_t,
+                    inner=[ix0, iy0, ix1, iy1], bed_pairs_placed=placed,
                     verified=verified, warnings=warnings)
 
 
 async def generate_studio_module(
     backend: AutoCADBackend,
     length_mm: float = 6000.0, width_mm: float = 2400.0, series: str = "arctic",
+    origin_x: float = 0.0, origin_y: float = 0.0, scene=None,
 ) -> CommandResult:
     """Studio module (студия-модуль) in one call — the element set of
     reference-studio-module-layout.png condensed into one 6000x2400 room:
@@ -1490,6 +2320,17 @@ async def generate_studio_module(
     a work zone (table + chair + wardrobe), an ENCLOSED санузел (shower + toilet
     + sink behind a real door), and the engineering symbols (convector under the
     window, split-system, electrical panel by the entrance).
+
+    ``origin_x`` / ``origin_y`` place the module's SW outer corner in world
+    coordinates (default 0,0 — the historical behaviour, byte-identical output).
+    Shell, openings, санузел partition + its door, every fixture and every tag
+    are derived from the inner-face locals, which are anchored on the origin, so
+    the room translates rigidly. Two X values here (``door_center``,
+    ``win_center``) are deliberately kept ABSOLUTE, because the convector and the
+    electrical panel are positioned off them; the wall-relative offsets the
+    opening generators want are derived from them by subtracting ``ox`` at the
+    call site. The returned payload carries the room's world ``bbox`` for
+    room-to-room overlap testing.
 
     The reference is a 9000x2500 drawing with a separate тамбур/гардероб; that
     does not fit 6000x2400, so this reproduces the STYLE and the fixture set, not
@@ -1525,31 +2366,42 @@ async def generate_studio_module(
     """
     L = float(length_mm)
     W = float(width_mm)
+    ox, oy = float(origin_x), float(origin_y)
     t = _resolve_wall_thickness(series, None)
-    modkw = dict(module_origin=DEFAULT_MODULE["origin"],
+    modkw = dict(module_origin=(ox, oy),
                  module_length=L, module_width=W, wall_thickness=t)
-    ix0, iy0, ix1, iy1 = t, t, L - t, W - t
+    # Inner faces in WORLD coordinates — see the dormitory generator: everything
+    # absolute is written against these, so the origin propagates by construction.
+    ix0, iy0, ix1, iy1 = ox + t, oy + t, ox + L - t, oy + W - t
     c = _Compose()
+    c.absorb(scene)
 
     # 1) Standards + thick-wall shell.
     c.add("setup_layers", await setup_layers(backend))
     c.add("setup_dimstyle", await setup_dimstyle(backend))
     c.add("draw_module_outline",
-          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series))
+          await draw_module_outline(backend, length_mm=L, width_mm=W, series=series,
+                                    origin=(ox, oy)))
 
     # Zone X-bands: living/bedroom (west, larger) | санузел (east, compact 1100).
     san_x = ix1 - 1100.0                      # санузел partition line
 
     # 2) Entrance (S) + window (N, over the living zone). Different walls -> the
     #    envelope cuts compose.
+    #    door_center / win_center are WORLD X (the convector and the panel hang off
+    #    them). The S and N walls both start at the SW/NW corner and run +X, so the
+    #    wall-relative offset the opening generators want is (world X - ox); the
+    #    generator re-adds module_origin internally. Passing the world X straight
+    #    through would double-shift both openings — the exact bug this parameter
+    #    was added to avoid.
     door_w = 950.0
     door_center = ix0 + 3100.0
     c.add("insert_exterior_door",
-          await insert_exterior_door(backend, "S", door_center - door_w / 2.0,
+          await insert_exterior_door(backend, "S", door_center - door_w / 2.0 - ox,
                                      door_w, "out", label="ВХОД", **modkw))
     win_w, win_center = 1120.0, ix0 + 3050.0
     c.add("insert_window",
-          await insert_window(backend, "N", win_center - win_w / 2.0, win_w,
+          await insert_window(backend, "N", win_center - win_w / 2.0 - ox, win_w,
                               label="ОКНО", **modkw))
 
     # 3) Double bed, head-to-NORTH (rot 0), NW corner. 1200 x 2000 (the
@@ -1641,9 +2493,17 @@ async def generate_studio_module(
           await insert_toilet(backend, san_x + 450.0, iy0 + toi_d / 2.0, 180.0,
                               scale=toi_scale))
 
+    # Same automatic collision guard as the dormitory (general principle): geometry
+    # + label overlap, and door-swing clearance, over every placed element
+    # (excluding the shell). The studio stays verified=False by design (packed
+    # novel combo needs a human screenshot), but any detected clash is still
+    # listed explicitly so real problems surface.
+    audit_warnings, _ = c.audit(exclude={"draw_module_outline"})
+    warnings = list(audit_warnings)
+    warnings.append("Studio layout is a packed, verified=False-by-design "
+                    "combination (double bed + enclosed санузел + engineering "
+                    "symbols in one 6000x2400 scene). Confirm by screenshot "
+                    "before treating it as final.")
     return c.result(series=str(series).strip().lower(), module=[L, W],
-                    wall_thickness=t, verified=False,
-                    warnings=["Studio layout is a packed, verified=False-by-design "
-                              "combination (double bed + enclosed санузел + "
-                              "engineering symbols in one 6000x2400 scene). Confirm "
-                              "by screenshot before treating it as final."])
+                    origin=[ox, oy], outer=[ox, oy, ox + L, oy + W],
+                    wall_thickness=t, verified=False, warnings=warnings)

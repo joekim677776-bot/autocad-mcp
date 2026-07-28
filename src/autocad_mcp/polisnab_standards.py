@@ -2627,15 +2627,26 @@ async def generate_dormitory_room(
     #    wide room that is S and N at their west end — byte-identical to before.
     bed_axis = _resolve_bed_axis(bed_axis, ix0, iy0, ix1, iy1)
     if bed_axis == "x":
-        row_walls, lock_end, lock_off = ("S", "N"), "W", side_t["W"]
-        bed_rot, axis = -90.0, 0
+        row_walls, ends = ("S", "N"), ("W", "E")
+        bed_rot, axis, run = -90.0, 0, L
         a_lo, a_hi, c_lo, c_hi = ix0, ix1, iy0, iy1
     else:
-        row_walls, lock_end, lock_off = ("W", "E"), "S", side_t["S"]
-        bed_rot, axis = 0.0, 1
+        row_walls, ends = ("W", "E"), ("S", "N")
+        bed_rot, axis, run = 0.0, 1, W
         a_lo, a_hi, c_lo, c_hi = iy0, iy1, ix0, ix1
 
     lock_cw, lock_depth, lock_n = 600.0, 420.0, 2
+    # THE LOCKERS GO AT THE DOOR'S END, not at a fixed one. Both the bank and
+    # the entrance swing eat frontage off a row wall; put them at the SAME end
+    # and they overlap, so together they cost max(1200, 950) = 1200. Put them at
+    # opposite ends and they cost 1200 + 950 = 2150 - which is the difference
+    # between four beds fitting and two. The end was hardcoded, so a room whose
+    # door faced the other way silently came back half empty (caught by the
+    # completeness check while assembling a row, not by looking at it).
+    dw_key = _SIDE_ALIASES.get(str(door_wall).strip().lower())
+    lock_end = dw_key if dw_key in ends else ends[0]
+    lock_off = (side_t[ends[0]] if lock_end == ends[0]
+                else run - side_t[ends[1]] - lock_n * lock_cw)
     lockkw = {k: v for k, v in modkw.items() if k != "side_thickness"}
     # UNTAGGED in the turned layout. There the two banks flank the entrance on a
     # 2400 mm facade, and both tags land in the one strip of floor left between

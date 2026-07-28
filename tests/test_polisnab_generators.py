@@ -1346,6 +1346,34 @@ class TestBedAxis:
             await ps.generate_dormitory_room(
                 backend, 6000.0, 2400.0, "arctic", 1, bed_axis="diagonal")
 
+    async def test_lockers_follow_the_door_end(self, backend):
+        # Both the locker bank and the entrance swing eat frontage off a row
+        # wall. At the SAME end they overlap and cost 1200 together; at
+        # opposite ends they cost 1200 + 950 - the difference between four beds
+        # and two. Found while assembling a row where half the rooms faced the
+        # other way.
+        for door, ww, tag in (("S", "N", "S"), ("N", "S", "N")):
+            r = await ps.generate_dormitory_room(
+                backend, 2400.0, 6000.0, "arctic", bed_pairs=2,
+                door_wall=door, door_swing="in", window_wall=ww)
+            p = r.payload
+            assert p["beds_placed"] == 4, (door, p["warnings"])
+            assert p["verified"] is True, (door, p["warnings"])
+            names = {n for n, *_ in p["boxes"] if n.startswith("insert_locker")}
+            assert names == {f"insert_locker_row[W{tag}]",
+                             f"insert_locker_row[E{tag}]"}, door
+
+    async def test_a_row_facing_either_way_is_full(self, backend):
+        # The row assembly case: rooms on the two sides of a corridor face
+        # opposite ways, and both sides must come out fully bedded.
+        for door, ww in (("S", "N"), ("N", "S")):
+            for i in range(3):
+                r = await ps.generate_dormitory_room(
+                    backend, 2400.0, 6000.0, "arctic", bed_pairs=2,
+                    origin_x=i * 2400.0, door_wall=door, door_swing="in",
+                    window_wall=ww, **ps.room_row_walls(i, 3))
+                assert r.payload["beds_placed"] == 4, (door, i, r.payload["warnings"])
+
 
 def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])

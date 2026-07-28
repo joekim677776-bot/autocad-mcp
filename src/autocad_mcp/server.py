@@ -683,6 +683,12 @@ async def polisnab(
     stay fixed on S/N because that layout is asymmetric and would need mirroring,
     not a flag.
 
+    insert_sanitary_block draws a shared WC block: stall_count cubicles (default
+    6), a derived basin count, an entrance door and the usual thick-wall shell.
+    x_mm/y_mm is the block CENTRE, not a corner, and rotation_deg accepts ONLY
+    quarter turns - the shell is axis-aligned, so a free angle is rejected
+    rather than rounded. Reports facade/depth back for complex arithmetic.
+
     generate_dormitory_room takes bed_axis ("auto" | "x" | "y"): the world axis
     beds are laid head-to-toe along, and so the axis the two bed rows run
     parallel to. "auto" picks the module's long side and reports the resolved
@@ -842,6 +848,16 @@ async def polisnab(
             room_number=d.get("room_number"),
             bed_axis=d.get("bed_axis", "auto"),
             door_open_deg=float(d.get("door_open_deg", 45.0)),
+        )
+    elif operation == "insert_sanitary_block":
+        result = await ps.insert_sanitary_block(
+            backend,
+            float(d.get("x_mm", 0.0)), float(d.get("y_mm", 0.0)),
+            float(d.get("rotation_deg", 0.0)),
+            int(d.get("stall_count", 6)),
+            series=d.get("series"),
+            sink_count=d.get("sink_count"),
+            label=d.get("label", "САНУЗЕЛ"),
         )
     elif operation == "insert_corridor":
         result = await ps.insert_corridor(

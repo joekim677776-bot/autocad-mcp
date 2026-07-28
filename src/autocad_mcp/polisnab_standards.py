@@ -204,6 +204,45 @@ DEFAULT_SERIES = "standard"
 # the number is a parameter precisely so it can be raised without a code change.
 PARTY_WALL_THICKNESS = 100.0
 
+# --- Sanitary block: WC cubicle sizing -------------------------------------
+# Derived, not copied from a catalogue. The chain, so a reviewer can attack any
+# single link rather than the number:
+#
+#   clear width 850  СП 44.13330 (bytovye buildings) gives a cubicle of
+#                    1200 x 800 mm. 800 is the MINIMUM; 850 spends 50 mm to buy
+#                    240 mm either side of our 370 mm toilet instead of 215 —
+#                    shoulder and knee room, the difference between "passes"
+#                    and "comfortable".
+#   partition    50  a WC cubicle divider is an HPL/laminate panel with fixings,
+#                    not the 75 mm room partition insert_interior_wall draws by
+#                    default. Using 75 here would silently claim a stud wall
+#                    between two toilets.
+#   PITCH       900  850 + 50. This is what the requester estimated, and the
+#                    derivation lands on it from below rather than being fitted
+#                    to it.
+#   clear depth 1200 the same СП figure. Our toilet is 650 deep, so 550 mm is
+#                    left to stand up and turn in.
+#   door width   700  850 clear less the jambs.
+#   AISLE      1300  700 + 600. A cubicle door opens OUTWARD (so a collapsed
+#                    occupant cannot block it) and therefore sweeps its full
+#                    700 mm into the aisle; 600 mm is a person standing at a
+#                    basin opposite. The aisle is not a round number someone
+#                    liked - it is exactly "a cubicle door can open fully
+#                    without touching someone washing their hands".
+#
+# HONESTY NOTE, same status as CORRIDOR_WIDTH and PARTY_WALL_THICKNESS: these
+# are engineering defaults. СП 44.13330 was reasoned from, not verified against
+# a current copy, and nothing here has been checked against the fire/evacuation
+# clauses that govern sanitary rooms. Parameters, not constants, so they can be
+# corrected without touching the layout code. See PROJECT-BRIEF §8a.
+SANITARY_STALL_CLEAR_WIDTH = 850.0
+SANITARY_STALL_CLEAR_DEPTH = 1200.0
+SANITARY_PARTITION_THICKNESS = 50.0
+SANITARY_STALL_DOOR_WIDTH = 700.0
+SANITARY_BASIN_STAND = 600.0
+SANITARY_SINK_PITCH = 700.0
+SANITARY_SINK_DEPTH = 400.0        # must track insert_sink (500 x 400)
+
 
 def _resolve_wall_thickness(series, wall_thickness_mm) -> float:
     """Resolve the wall-band thickness: an explicit ``wall_thickness_mm`` wins,
@@ -1207,14 +1246,16 @@ async def _draw_door_leaf(d, hinge, along_unit, swing_dir, width, open_deg=90.0)
     return _sector_aabb(hinge[0], hinge[1], w, fa % 360.0, fe % 360.0)
 
 
-async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm):
+async def _draw_door_symbol(backend, hinge, along_unit, swing_dir, width_mm,
+                            *, open_deg: float = 90.0):
     """Standalone door leaf + swing arc on AR-DOOR, hinged at ``hinge`` — for a
     door in an INTERIOR partition (which is drawn as two insert_interior_wall
     segments with the door opening as the gap between them; this only draws the
     leaf/arc symbol into that gap). ``along_unit`` points toward the far jamb,
     ``swing_dir`` is the side the leaf opens into."""
     d = _Draw(backend, AR_DOOR_LAYER)
-    swing = await _draw_door_leaf(d, hinge, along_unit, swing_dir, width_mm)
+    swing = await _draw_door_leaf(d, hinge, along_unit, swing_dir, width_mm,
+                                  open_deg)
     return d.result(hinge=[float(hinge[0]), float(hinge[1])], width=float(width_mm),
                     swing_bbox=list(swing))
 
@@ -2667,6 +2708,131 @@ async def generate_dormitory_room(
                     beds_placed=beds_got, beds_requested=beds_req,
                     bed_axis=bed_axis,
                     verified=verified, warnings=warnings)
+
+
+async def insert_sanitary_block(
+    backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
+    stall_count: int = 6, *, series=None, sink_count=None, scene=None,
+    label: str | None = "САНУЗЕЛ",
+) -> CommandResult:
+    """Shared WC block: a row of ``stall_count`` cubicles, a basin run and an
+    entrance door, inside the usual thick-wall shell. Composite - it calls
+    insert_toilet / insert_sink / insert_interior_wall / insert_interior_door
+    rather than replacing any of them.
+
+    ``x_mm, y_mm`` is the block's CENTRE (like the furniture primitives, not
+    like the room generators' origin_x/origin_y). The block is drawn
+    axis-aligned, so ``rotation_deg`` only accepts 0 for now.
+
+    LAYOUT, in the block's own frame: cubicles line the BACK wall facing the
+    entrance, basins line the ENTRANCE wall, and the aisle runs between them.
+    The aisle depth is derived (cubicle door + person at a basin), not chosen -
+    see the constants above.
+
+    BASIN COUNT is deliberately not one per cubicle. Norms for public WCs run
+    around one basin per four appliances, which would give 2 here; this uses
+    ``ceil(stalls/2)``, i.e. 3 for six cubicles, because a shift camp is the
+    worst case for a ratio derived from averaged demand - everybody arrives at
+    the same minute when the shift ends, so the queue forms at the basins, not
+    over the day. Override with ``sink_count`` if the real occupancy says
+    otherwise.
+
+    NO CLEARANCE ZONE is published for the aisle, on purpose. Unlike a corridor,
+    a WC aisle is *meant* to have doors swinging into it - that is the safe
+    arrangement - so a clearance zone would fire on correct geometry every time.
+    What is published instead is each cubicle door's swept sector, and the aisle
+    is sized from it.
+    """
+    n = max(1, int(stall_count))
+    t = _resolve_wall_thickness(series, None)
+    cw = SANITARY_STALL_CLEAR_WIDTH
+    tp = SANITARY_PARTITION_THICKNESS
+    sd = SANITARY_STALL_CLEAR_DEPTH
+    aisle = SANITARY_STALL_DOOR_WIDTH + SANITARY_BASIN_STAND
+    n_sink = int(sink_count) if sink_count is not None else max(2, -(-n // 2))
+
+    # Local envelope: the cubicle row sets the width, the three bands set the depth.
+    inner_w = n * cw + (n - 1) * tp
+    inner_d = sd + aisle + SANITARY_SINK_DEPTH
+    L, W = inner_w + 2 * t, inner_d + 2 * t
+    if int(round(float(rotation_deg))) % 360:
+        raise ValueError(
+            f"rotation_deg={rotation_deg!r}: the block is drawn axis-aligned; "
+            f"rotation is not supported yet")
+    ol, ow, rot = L, W, 0.0
+    ox, oy = x_mm - ol / 2.0, y_mm - ow / 2.0
+    place = lambda lx, ly: (ox + lx, oy + ly)
+
+    ix0, iy0, ix1, iy1 = t, t, L - t, W - t      # inner faces, LOCAL
+    modkw = dict(module_origin=(ox, oy), module_length=ol, module_width=ow,
+                 wall_thickness=t)
+
+    c = _Compose()
+    c.absorb(scene)
+    c.add("setup_layers", await setup_layers(backend))
+    c.add("draw_module_outline",
+          await draw_module_outline(backend, length_mm=ol, width_mm=ow,
+                                    series=series, origin=(ox, oy)))
+
+    # 1) Entrance, on the basin wall at the end away from the basins.
+    door_w = 840.0
+    door_lo = ix1 - 300.0 - door_w
+    ws, woff = "S", door_lo
+    facade, depth = ol, ow
+    c.add("insert_interior_door",
+          await insert_interior_door(backend, ws, woff, door_w, "in",
+                                     label="ВХОД", **modkw))
+
+    # 2) Cubicles: toilet, the partition on its far side, and the door leaf.
+    for i in range(n):
+        sx0 = ix0 + i * (cw + tp)
+        cx_l = sx0 + cw / 2.0
+        wx, wy = place(cx_l, iy1 - 325.0)         # toilet 650 deep, back to the wall
+        c.add(f"insert_toilet[{i + 1}]",
+              await insert_toilet(backend, wx, wy, rot))
+        if i < n - 1:                              # n cubicles need n-1 dividers
+            px = sx0 + cw + tp / 2.0
+            c.add(f"insert_interior_wall[stall{i + 1}/{i + 2}]",
+                  await insert_interior_wall(backend, place(px, iy1),
+                                             place(px, iy1 - sd), tp))
+        # Door leaf, hinged at the near jamb and opening OUT into the aisle.
+        # Drawn at 45 deg for a readable plan; the published sector is the full
+        # quarter turn, exactly as the entrance doors do it.
+        hinge = place(sx0 + 75.0, iy1 - sd)
+        along = place(sx0 + 76.0, iy1 - sd)
+        out = place(sx0 + 75.0, iy1 - sd - 1.0)
+        au = (along[0] - hinge[0], along[1] - hinge[1])
+        so = (out[0] - hinge[0], out[1] - hinge[1])
+        c.add(f"insert_stall_door[{i + 1}]",
+              await _draw_door_symbol(backend, hinge, au, so,
+                                      SANITARY_STALL_DOOR_WIDTH, open_deg=45.0))
+
+    # 3) Basins along the entrance wall, from the far end so they stay clear of
+    #    the door and its swing.
+    for j in range(n_sink):
+        sx_l = ix0 + 100.0 + SANITARY_SINK_PITCH * j + 250.0
+        wx, wy = place(sx_l, iy0 + SANITARY_SINK_DEPTH / 2.0)
+        c.add(f"insert_sink[{j + 1}]",
+              await insert_sink(backend, wx, wy, rot + 180.0))
+
+    if label:
+        lx, ly = place((ix0 + ix1) / 2.0, iy0 + SANITARY_SINK_DEPTH + aisle / 2.0)
+        d = _Draw(backend, TEXT_LAYER)
+        await d.mtext(lx, ly, str(label), height=LABEL_HEIGHT, layer=TEXT_LAYER)
+        c.add("insert_label", d.result())
+
+    warnings, verified = c.audit(exclude={"draw_module_outline"})
+    r = c.result(origin=[ox, oy], outer=[ox, oy, ox + ol, oy + ow],
+                 module=[ol, ow], facade=facade, depth=depth,
+                 stall_count=n, sink_count=n_sink,
+                 stall_pitch=cw + tp, aisle_depth=aisle,
+                 wall_thickness=t, rotation=rot,
+                 verified=verified, warnings=warnings)
+    if r.ok:
+        r.payload["boxes"] = [[n_, *b] for n_, b in c.boxes]
+        r.payload["labels"] = [[n_, *b] for n_, b in c.labels]
+        r.payload["swings"] = [[n_, *b] for n_, b in c.swings]
+    return r
 
 
 async def generate_studio_module(

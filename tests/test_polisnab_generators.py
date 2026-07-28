@@ -1351,3 +1351,72 @@ def _boxes_overlap_simple(a, b):
     dx = min(a[2], b[2]) - max(a[0], b[0])
     dy = min(a[3], b[3]) - max(a[1], b[1])
     return dx > 1e-6 and dy > 1e-6
+
+
+class TestSanitaryBlock:
+    """Phase 4c (2026-07-28): shared WC block, a composite over insert_toilet."""
+
+    async def _blk(self, backend, **kw):
+        kw.setdefault("series", "arctic")
+        return await ps.insert_sanitary_block(backend, 0.0, 0.0, **kw)
+
+    async def test_the_derived_dimensions(self, backend):
+        r = await self._blk(backend, stall_count=6)
+        p = r.payload
+        assert p["stall_pitch"] == pytest.approx(900.0)     # 850 clear + 50 panel
+        assert p["aisle_depth"] == pytest.approx(1300.0)    # 700 leaf + 600 at basin
+        assert p["facade"] == pytest.approx(5650.0)         # 6*850 + 5*50 + 2*150
+        assert p["depth"] == pytest.approx(3200.0)          # 1200 + 1300 + 400 + 300
+
+    async def test_it_assembles_clean(self, backend):
+        for n in (5, 6):
+            r = await self._blk(backend, stall_count=n)
+            assert r.ok and r.payload["verified"] is True, r.payload["warnings"]
+            assert r.payload["warnings"] == []
+
+    async def test_one_partition_between_each_pair(self, backend):
+        # n cubicles need n-1 dividers - the end ones are the shell.
+        r = await self._blk(backend, stall_count=6)
+        names = [n for n, *_ in r.payload["boxes"]]
+        assert len([n for n in names if n.startswith("insert_interior_wall")]) == 5
+        assert len([n for n in names if n.startswith("insert_toilet")]) == 6
+
+    async def test_the_toilet_has_shoulder_room(self, backend):
+        # 850 clear less the 370 toilet, split evenly.
+        r = await self._blk(backend, stall_count=6)
+        b = {n: box for n, *box in r.payload["boxes"]}
+        t1 = b["insert_toilet[1]"]
+        assert t1[2] - t1[0] == pytest.approx(370.0)
+        left = t1[0] - (r.payload["origin"][0] + 150.0)
+        assert left == pytest.approx(240.0)
+
+    async def test_the_aisle_is_sized_by_the_swing(self, backend):
+        # The whole point of 1300: a cubicle door opens fully and still clears
+        # someone at a basin. Asserted, not assumed.
+        r = await self._blk(backend, stall_count=6)
+        b = {n: box for n, *box in r.payload["boxes"]}
+        sw = {n: box for n, *box in r.payload["swings"]}
+        for name, swing in sw.items():
+            for sink in [v for k, v in b.items() if k.startswith("insert_sink")]:
+                assert not _boxes_overlap_simple(swing, sink), (name, sink)
+
+    async def test_the_stall_swing_is_a_full_quarter_turn(self, backend):
+        # Drawn at 45 for a readable plan; the reserved floor is still 90.
+        r = await self._blk(backend, stall_count=6)
+        sw = {n: box for n, *box in r.payload["swings"]}
+        s1 = sw["insert_stall_door[1]"]
+        assert s1[2] - s1[0] == pytest.approx(700.0)
+        assert s1[3] - s1[1] == pytest.approx(700.0)
+
+    async def test_basins_are_not_one_per_stall(self, backend):
+        assert (await self._blk(backend, stall_count=6)).payload["sink_count"] == 3
+        assert (await self._blk(backend, stall_count=5)).payload["sink_count"] == 3
+        assert (await self._blk(backend, stall_count=2)).payload["sink_count"] == 2
+        r = await self._blk(backend, stall_count=6, sink_count=4)
+        assert r.payload["sink_count"] == 4
+
+    async def test_no_aisle_clearance_zone(self, backend):
+        # Deliberate: a WC aisle is MEANT to have doors swinging into it, so a
+        # clearance zone would fire on correct geometry every time.
+        r = await self._blk(backend, stall_count=6)
+        assert not r.payload.get("clearances")

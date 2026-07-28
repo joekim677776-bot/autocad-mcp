@@ -52,6 +52,15 @@ The LISP dispatcher (`lisp-code/mcp_dispatch.lsp`) lives in the namespace of a
   (Known-flaky: `-PLOT` to `DWG To PDF.pc3` is a fragile, version-sensitive
   prompt sequence — if no PDF appears, plot manually from the app.)
 
+- **Новый параметр генератора не доезжает до MCP-диспетчера сам.** Добавил
+  аргумент в функцию в `polisnab_standards.py` — обязательно прокинь его в
+  `server.py`, иначе вызов вернёт `ok:true`, `verified:true`, ноль warnings и
+  **нарисует конфигурацию по умолчанию**. Отличить можно только по **эху
+  параметра в payload** (`entrance: "row"` вместо `"end"`, `lead_in: 0`), не по
+  картинке и не по `ok`. Случалось дважды: `room_number`, `entrance`.
+  Правило: после добавления параметра сверять его значение в ответе, а не факт
+  успеха. Та же категория, что `ok:true`≠успех и имя документа в `drawing create`.
+
 ## Selection rule (erase / modify)
 Programmatic entity selection for erase/modify must use `ssget "_X"` (whole
 database) + an explicit geometric intersection test, **never** `"_C"` / `"_W"`

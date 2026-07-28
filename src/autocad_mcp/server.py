@@ -860,6 +860,7 @@ async def polisnab(
             series=d.get("series"),
             sink_count=d.get("sink_count"),
             entrance=d.get("entrance", "row"),
+            depth_mm=d.get("depth_mm"),
             label=d.get("label", "САНУЗЕЛ"),
         )
     elif operation == "insert_corridor":

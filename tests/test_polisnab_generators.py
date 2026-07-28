@@ -1504,3 +1504,36 @@ class TestSanitaryBlock:
     async def test_an_unknown_entrance_is_rejected(self, backend):
         with pytest.raises(ValueError):
             await self._blk(backend, stall_count=5, entrance="middle")
+
+    async def test_depth_padding_to_a_room_row(self, backend):
+        # The complex pads the block to the room depth so it sits flush.
+        r = await self._blk(backend, stall_count=5, entrance="end", depth_mm=6000.0)
+        p = r.payload
+        assert p["depth"] == pytest.approx(6000.0)
+        assert p["facade"] == pytest.approx(3200.0)
+        assert p["lead_in"] == pytest.approx(1250.0)   # 840 derived + 410 padding
+        assert p["verified"] is True, p["warnings"]
+
+    async def test_the_padding_goes_into_the_entry(self, backend):
+        # Not tacked on past the last cubicle: at the derived minimum the
+        # entrance clears the first cubicle by only 75 mm, so the space is
+        # worth more at that end.
+        bare = await self._blk(backend, stall_count=5, entrance="end")
+        pad = await self._blk(backend, stall_count=5, entrance="end", depth_mm=6000.0)
+
+        def gap(p):
+            sw = {n: box for n, *box in p.payload["swings"]}
+            e, s1 = sw["insert_interior_door"], sw["insert_stall_door[1]"]
+            return max(s1[0] - e[2], e[0] - s1[2])
+
+        assert gap(bare) == pytest.approx(75.0)
+        assert gap(pad) == pytest.approx(485.0)
+
+    async def test_padding_below_the_minimum_is_rejected(self, backend):
+        # Would put the entrance sweep back on top of the first cubicle's.
+        with pytest.raises(ValueError):
+            await self._blk(backend, stall_count=5, entrance="end", depth_mm=5000.0)
+
+    async def test_depth_padding_needs_an_end_entrance(self, backend):
+        with pytest.raises(ValueError):
+            await self._blk(backend, stall_count=5, depth_mm=6000.0)

@@ -2759,7 +2759,7 @@ async def generate_dormitory_room(
 async def insert_sanitary_block(
     backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
     stall_count: int = 6, *, series=None, sink_count=None, scene=None,
-    entrance: str = "row", label: str | None = "САНУЗЕЛ",
+    entrance: str = "row", depth_mm=None, label: str | None = "САНУЗЕЛ",
 ) -> CommandResult:
     """Shared WC block: a row of ``stall_count`` cubicles, a basin run and an
     entrance door, inside the usual thick-wall shell. Composite - it calls
@@ -2823,6 +2823,25 @@ async def insert_sanitary_block(
     # door is hinged 75 mm along the row, so the row has to start at least
     # door_w - 75 further in. Using door_w keeps that 75 mm as margin.
     lead_in = door_w if ent == "end" else 0.0
+    # ``depth_mm`` pads the block to a stated depth so it can sit flush in a row
+    # of rooms. The padding goes into the LEAD-IN, i.e. into the entry area,
+    # rather than being tacked on past the last cubicle: at the derived minimum
+    # the entrance clears the first cubicle's swing by only 75 mm, so the space
+    # is worth more at that end. Padding below the derived minimum is rejected -
+    # it would put the two door sweeps back on top of each other.
+    if depth_mm is not None:
+        if ent != "end":
+            raise ValueError(
+                "depth_mm only applies to entrance='end'; with entrance='row' "
+                "the row direction IS the facade, so padding it is a different "
+                "decision")
+        padded = float(depth_mm) - 2 * t - row_w
+        if padded < lead_in - 1e-6:
+            raise ValueError(
+                f"depth_mm={depth_mm!r} leaves a {padded:.0f} mm lead-in, under "
+                f"the {lead_in:.0f} mm the entrance needs to open clear of the "
+                f"first cubicle")
+        lead_in = padded
     inner_w = lead_in + row_w
     inner_d = sd + aisle + SANITARY_SINK_DEPTH
     L, W = inner_w + 2 * t, inner_d + 2 * t

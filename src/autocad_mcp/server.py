@@ -685,8 +685,10 @@ async def polisnab(
 
     insert_sanitary_block draws a shared WC block: stall_count cubicles (default
     6), a derived basin count, an entrance door and the usual thick-wall shell.
-    x_mm/y_mm is the block CENTRE, not a corner, and rotation_deg accepts ONLY
-    quarter turns - the shell is axis-aligned, so a free angle is rejected
+    entrance picks the wall the door is in: "row" (default, the long wall beside
+    the basins) or "end" (the short end wall, which turns the facade to 3200 at
+    the cost of one door width of depth). x_mm/y_mm is the block CENTRE, not a
+    corner, and rotation_deg accepts ONLY quarter turns - the shell is axis-aligned, so a free angle is rejected
     rather than rounded. Reports facade/depth back for complex arithmetic.
 
     generate_dormitory_room takes bed_axis ("auto" | "x" | "y"): the world axis
@@ -857,6 +859,7 @@ async def polisnab(
             int(d.get("stall_count", 6)),
             series=d.get("series"),
             sink_count=d.get("sink_count"),
+            entrance=d.get("entrance", "row"),
             label=d.get("label", "САНУЗЕЛ"),
         )
     elif operation == "insert_corridor":

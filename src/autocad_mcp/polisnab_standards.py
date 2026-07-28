@@ -2759,7 +2759,7 @@ async def generate_dormitory_room(
 async def insert_sanitary_block(
     backend: AutoCADBackend, x_mm: float, y_mm: float, rotation_deg: float = 0.0,
     stall_count: int = 6, *, series=None, sink_count=None, scene=None,
-    label: str | None = "САНУЗЕЛ",
+    entrance: str = "row", label: str | None = "САНУЗЕЛ",
 ) -> CommandResult:
     """Shared WC block: a row of ``stall_count`` cubicles, a basin run and an
     entrance door, inside the usual thick-wall shell. Composite - it calls
@@ -2770,8 +2770,23 @@ async def insert_sanitary_block(
     like the room generators' origin_x/origin_y) and ``rotation_deg`` turns the
     whole block; only quarter turns are accepted, see _quarter_turn.
 
-    LAYOUT, in the block's own frame: cubicles line the BACK wall facing the
-    entrance, basins line the ENTRANCE wall, and the aisle runs between them.
+    LAYOUT, in the block's own frame: cubicles line the BACK wall, basins line
+    the opposite long wall, and the aisle runs between them.
+
+    ``entrance`` picks which wall the door is in, and it changes the block's
+    proportions, not just a position:
+
+      "row" (default)  on the long wall beside the basins. The block then
+                       presents that long wall - 5650 mm for six cubicles - to
+                       whatever it opens onto, whichever way it is rotated.
+      "end"            on the SHORT end wall, past the start of the cubicle
+                       row. The facade becomes the 3200 mm end.
+
+    "end" is not free: the entrance sweeps its own width into the room, and the
+    first cubicle's door sweeps out into the same aisle. The row is therefore
+    pushed back by a lead-in derived from that overlap (the entrance width,
+    which clears the first cubicle's jamb by 75 mm) - so an end entrance costs
+    one door's width of depth.
     The aisle depth is derived (cubicle door + person at a basin), not chosen -
     see the constants above.
 
@@ -2798,7 +2813,17 @@ async def insert_sanitary_block(
     n_sink = int(sink_count) if sink_count is not None else max(2, -(-n // 2))
 
     # Local envelope: the cubicle row sets the width, the three bands set the depth.
-    inner_w = n * cw + (n - 1) * tp
+    door_w = 840.0
+    ent = str(entrance).strip().lower()
+    if ent not in ("row", "end"):
+        raise ValueError(f"entrance={entrance!r}: use 'row' or 'end'")
+    row_w = n * cw + (n - 1) * tp
+    # Lead-in before the first cubicle, so the entrance can open. DERIVED, not
+    # chosen: the entrance sweeps door_w into the room and the first cubicle's
+    # door is hinged 75 mm along the row, so the row has to start at least
+    # door_w - 75 further in. Using door_w keeps that 75 mm as margin.
+    lead_in = door_w if ent == "end" else 0.0
+    inner_w = lead_in + row_w
     inner_d = sd + aisle + SANITARY_SINK_DEPTH
     L, W = inner_w + 2 * t, inner_d + 2 * t
     place, ol, ow, ox, oy, rot = _quarter_turn(rotation_deg, x_mm, y_mm, L, W)
@@ -2814,11 +2839,16 @@ async def insert_sanitary_block(
           await draw_module_outline(backend, length_mm=ol, width_mm=ow,
                                     series=series, origin=(ox, oy)))
 
-    # 1) Entrance, on the basin wall at the end away from the basins.
-    door_w = 840.0
-    door_lo = ix1 - 300.0 - door_w
-    ws, woff = _world_side_of(place(door_lo, 0.0), place(door_lo + door_w, 0.0),
-                              ox, oy, ol, ow)
+    # 1) Entrance: on the basin wall clear of the basins, or in the end wall
+    #    lined up with the aisle so it opens into circulation, not a cubicle.
+    if ent == "end":
+        a_lo = iy0 + SANITARY_SINK_DEPTH
+        off = a_lo + (aisle - door_w) / 2.0
+        p1, p2 = place(0.0, off), place(0.0, off + door_w)
+    else:
+        door_lo = ix1 - 300.0 - door_w
+        p1, p2 = place(door_lo, 0.0), place(door_lo + door_w, 0.0)
+    ws, woff = _world_side_of(p1, p2, ox, oy, ol, ow)
     # FACADE IS THE WALL THE ENTRANCE IS ON, not the bounding box's X extent.
     # Those coincide at rot 0/180 and diverge at 90/270, so reporting the bbox
     # would hand a caller sizing a complex the wrong number for exactly the
@@ -2830,7 +2860,7 @@ async def insert_sanitary_block(
 
     # 2) Cubicles: toilet, the partition on its far side, and the door leaf.
     for i in range(n):
-        sx0 = ix0 + i * (cw + tp)
+        sx0 = ix0 + lead_in + i * (cw + tp)
         cx_l = sx0 + cw / 2.0
         wx, wy = place(cx_l, iy1 - 325.0)         # toilet 650 deep, back to the wall
         c.add(f"insert_toilet[{i + 1}]",
@@ -2870,7 +2900,8 @@ async def insert_sanitary_block(
     r = c.result(origin=[ox, oy], outer=[ox, oy, ox + ol, oy + ow],
                  module=[ol, ow], facade=facade, depth=depth,
                  entrance_wall=ws,
-                 stall_count=n, sink_count=n_sink,
+                 stall_count=n, sink_count=n_sink, entrance=ent,
+                 lead_in=lead_in,
                  stall_pitch=cw + tp, aisle_depth=aisle,
                  wall_thickness=t, rotation=rot,
                  verified=verified, warnings=warnings)

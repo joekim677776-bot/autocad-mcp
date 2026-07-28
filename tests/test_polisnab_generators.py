@@ -1453,3 +1453,46 @@ class TestSanitaryBlock:
         # come back looking plausible and be wrong.
         with pytest.raises(ValueError):
             await self._blk(backend, stall_count=6, rotation_deg=37.0)
+
+    async def test_end_entrance_five_stalls_measured(self, backend):
+        # The complex default. Numbers asserted as MEASURED off the built
+        # geometry, not as the estimate that motivated the option (5650 was a
+        # guess; the derivation lands on 5590).
+        r = await self._blk(backend, stall_count=5, entrance="end")
+        p = r.payload
+        assert p["facade"] == pytest.approx(3200.0)
+        assert p["depth"] == pytest.approx(5590.0)
+        assert p["lead_in"] == pytest.approx(840.0)
+        assert p["verified"] is True, p["warnings"]
+
+    async def test_the_lead_in_is_what_lets_the_entrance_open(self, backend):
+        # The whole reason an end entrance costs depth: without the lead-in the
+        # entrance sweep and the first cubicle's sweep share floor.
+        r = await self._blk(backend, stall_count=5, entrance="end")
+        sw = {n: box for n, *box in r.payload["swings"]}
+        assert not _boxes_overlap_simple(sw["insert_interior_door"],
+                                         sw["insert_stall_door[1]"])
+        b = {n: box for n, *box in r.payload["boxes"]}
+        for name, box in b.items():
+            if name.startswith("insert_stall_door") or name.startswith("insert_toilet"):
+                assert not _boxes_overlap_simple(sw["insert_interior_door"], box), name
+
+    async def test_end_entrance_turns_the_facade(self, backend):
+        row = await self._blk(backend, stall_count=6)
+        end = await self._blk(backend, stall_count=6, entrance="end")
+        assert row.payload["facade"] == pytest.approx(5650.0)
+        assert end.payload["facade"] == pytest.approx(3200.0)
+        # An end entrance costs exactly one door width of depth.
+        assert end.payload["depth"] - row.payload["facade"] == pytest.approx(840.0)
+
+    async def test_the_row_variant_is_untouched(self, backend):
+        r = await self._blk(backend, stall_count=6)
+        assert r.payload["entrance"] == "row"
+        assert r.payload["lead_in"] == pytest.approx(0.0)
+        assert r.payload["facade"] == pytest.approx(5650.0)
+        assert r.payload["depth"] == pytest.approx(3200.0)
+        assert r.payload["verified"] is True
+
+    async def test_an_unknown_entrance_is_rejected(self, backend):
+        with pytest.raises(ValueError):
+            await self._blk(backend, stall_count=5, entrance="middle")

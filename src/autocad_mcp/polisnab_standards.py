@@ -2891,7 +2891,14 @@ async def insert_sanitary_block(
               await insert_sink(backend, wx, wy, rot + 180.0))
 
     if label:
-        lx, ly = place((ix0 + ix1) / 2.0, iy0 + SANITARY_SINK_DEPTH + aisle / 2.0)
+        # NOT the middle of the aisle. The cubicle doors sweep SANITARY_STALL_
+        # DOOR_WIDTH out of the aisle from the cubicle side, leaving only the
+        # basin-side strip (= SANITARY_BASIN_STAND) actually clear; a tag on the
+        # centre line sits 50 mm inside that sweep. At rot 0 the boxes merely
+        # touched and the check passed - a quarter turn plus rounding turned the
+        # same geometry into a 5 mm overlap, which is how it was found.
+        lx, ly = place((ix0 + ix1) / 2.0,
+                       iy0 + SANITARY_SINK_DEPTH + SANITARY_BASIN_STAND / 2.0)
         d = _Draw(backend, TEXT_LAYER)
         await d.mtext(lx, ly, str(label), height=LABEL_HEIGHT, layer=TEXT_LAYER)
         c.add("insert_label", d.result())

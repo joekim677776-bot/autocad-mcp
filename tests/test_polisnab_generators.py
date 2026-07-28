@@ -1477,6 +1477,14 @@ class TestSanitaryBlock:
             if name.startswith("insert_stall_door") or name.startswith("insert_toilet"):
                 assert not _boxes_overlap_simple(sw["insert_interior_door"], box), name
 
+    async def test_the_label_stays_out_of_the_door_sweep(self, backend):
+        # Found by a quarter turn: a tag on the aisle centre line sits inside
+        # the cubicle-door sweep and only *touches* at rot 0.
+        for rot in (0.0, 90.0, 180.0, 270.0):
+            r = await self._blk(backend, stall_count=5, entrance="end",
+                                rotation_deg=rot)
+            assert r.payload["verified"] is True, (rot, r.payload["warnings"])
+
     async def test_end_entrance_turns_the_facade(self, backend):
         row = await self._blk(backend, stall_count=6)
         end = await self._blk(backend, stall_count=6, entrance="end")

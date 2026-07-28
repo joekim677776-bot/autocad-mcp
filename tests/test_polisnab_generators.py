@@ -1420,3 +1420,36 @@ class TestSanitaryBlock:
         # clearance zone would fire on correct geometry every time.
         r = await self._blk(backend, stall_count=6)
         assert not r.payload.get("clearances")
+
+    async def test_facade_is_the_entrance_wall_not_the_bbox(self, backend):
+        # The distinction only shows up under a quarter turn, which is exactly
+        # the case a caller rotates the block for. Reporting the bounding box's
+        # X extent as "facade" gave 3200 for a block whose entrance sits on a
+        # 5650 wall - the wrong number for sizing a complex.
+        for rot in (0.0, 90.0, 180.0, 270.0):
+            r = await self._blk(backend, stall_count=6, rotation_deg=rot)
+            p = r.payload
+            assert p["facade"] == pytest.approx(5650.0), rot
+            assert p["depth"] == pytest.approx(3200.0), rot
+            b = {n: box for n, *box in p["boxes"]}
+            door = b["insert_interior_door"]
+            wall = max(door[2] - door[0], door[3] - door[1])
+            assert wall == pytest.approx(840.0), rot     # the leaf, on that wall
+            assert p["entrance_wall"] in ("S", "N", "W", "E")
+
+    async def test_a_quarter_turn_swaps_the_bounding_box(self, backend):
+        flat = await self._blk(backend, stall_count=6)
+        turned = await self._blk(backend, stall_count=6, rotation_deg=90.0)
+        assert turned.payload["module"] == pytest.approx(flat.payload["module"][::-1])
+        assert turned.payload["verified"] is True, turned.payload["warnings"]
+
+    async def test_every_quarter_turn_assembles(self, backend):
+        for rot in (0.0, 90.0, 180.0, 270.0):
+            r = await self._blk(backend, stall_count=6, rotation_deg=rot)
+            assert r.payload["verified"] is True, (rot, r.payload["warnings"])
+
+    async def test_a_free_angle_is_rejected(self, backend):
+        # Not rounded to the nearest quarter: a block drawn at 37 degrees would
+        # come back looking plausible and be wrong.
+        with pytest.raises(ValueError):
+            await self._blk(backend, stall_count=6, rotation_deg=37.0)

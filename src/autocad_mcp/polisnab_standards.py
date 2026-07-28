@@ -244,6 +244,52 @@ SANITARY_SINK_PITCH = 700.0
 SANITARY_SINK_DEPTH = 400.0        # must track insert_sink (500 x 400)
 
 
+def _quarter_turn(rot, cx, cy, length, width):
+    """Local (0..length, 0..width) -> world, for a quarter turn about (cx, cy).
+
+    Composites that draw a shell cannot be rotated freely: draw_module_outline
+    is axis-aligned by construction. Quarter turns are the only ones a building
+    ever asks for, and they keep the envelope axis-aligned, so those are
+    supported and anything else is REJECTED rather than silently rounded - a
+    block drawn at 37 degrees would come back looking plausible and be wrong.
+    """
+    r = int(round(float(rot))) % 360
+    if r % 90:
+        raise ValueError(
+            f"rotation_deg={rot!r}: a sanitary block draws an axis-aligned "
+            f"shell, so only quarter turns (0/90/180/270) can be honoured")
+    ol, ow = (length, width) if r in (0, 180) else (width, length)
+    ox, oy = cx - ol / 2.0, cy - ow / 2.0
+    if r == 0:
+        place = lambda lx, ly: (ox + lx, oy + ly)
+    elif r == 90:
+        place = lambda lx, ly: (ox + ol - ly, oy + lx)
+    elif r == 180:
+        place = lambda lx, ly: (ox + ol - lx, oy + ow - ly)
+    else:
+        place = lambda lx, ly: (ox + ly, oy + ow - lx)
+    return place, ol, ow, ox, oy, float(r)
+
+
+def _world_side_of(p1, p2, ox, oy, ol, ow):
+    """Which world wall an opening landed on after a quarter turn, and its
+    offset along that wall from the wall's own start corner.
+
+    Computed from the mapped endpoints rather than from a rotation lookup
+    table: a quarter turn reverses the traversal direction of half the sides,
+    and a table that gets one of those backwards puts the door at the far end
+    of the wall while still returning ok."""
+    tol = 1.0
+    xs, ys = sorted((p1[0], p2[0])), sorted((p1[1], p2[1]))
+    if abs(ys[0] - oy) < tol and abs(ys[1] - oy) < tol:
+        return "S", xs[0] - ox
+    if abs(ys[0] - (oy + ow)) < tol and abs(ys[1] - (oy + ow)) < tol:
+        return "N", xs[0] - ox
+    if abs(xs[0] - ox) < tol and abs(xs[1] - ox) < tol:
+        return "W", ys[0] - oy
+    return "E", ys[0] - oy
+
+
 def _resolve_wall_thickness(series, wall_thickness_mm) -> float:
     """Resolve the wall-band thickness: an explicit ``wall_thickness_mm`` wins,
     otherwise the insulation thickness for ``series`` (default Standard 75 mm)."""
@@ -2721,8 +2767,8 @@ async def insert_sanitary_block(
     rather than replacing any of them.
 
     ``x_mm, y_mm`` is the block's CENTRE (like the furniture primitives, not
-    like the room generators' origin_x/origin_y). The block is drawn
-    axis-aligned, so ``rotation_deg`` only accepts 0 for now.
+    like the room generators' origin_x/origin_y) and ``rotation_deg`` turns the
+    whole block; only quarter turns are accepted, see _quarter_turn.
 
     LAYOUT, in the block's own frame: cubicles line the BACK wall facing the
     entrance, basins line the ENTRANCE wall, and the aisle runs between them.
@@ -2755,13 +2801,7 @@ async def insert_sanitary_block(
     inner_w = n * cw + (n - 1) * tp
     inner_d = sd + aisle + SANITARY_SINK_DEPTH
     L, W = inner_w + 2 * t, inner_d + 2 * t
-    if int(round(float(rotation_deg))) % 360:
-        raise ValueError(
-            f"rotation_deg={rotation_deg!r}: the block is drawn axis-aligned; "
-            f"rotation is not supported yet")
-    ol, ow, rot = L, W, 0.0
-    ox, oy = x_mm - ol / 2.0, y_mm - ow / 2.0
-    place = lambda lx, ly: (ox + lx, oy + ly)
+    place, ol, ow, ox, oy, rot = _quarter_turn(rotation_deg, x_mm, y_mm, L, W)
 
     ix0, iy0, ix1, iy1 = t, t, L - t, W - t      # inner faces, LOCAL
     modkw = dict(module_origin=(ox, oy), module_length=ol, module_width=ow,
@@ -2777,8 +2817,13 @@ async def insert_sanitary_block(
     # 1) Entrance, on the basin wall at the end away from the basins.
     door_w = 840.0
     door_lo = ix1 - 300.0 - door_w
-    ws, woff = "S", door_lo
-    facade, depth = ol, ow
+    ws, woff = _world_side_of(place(door_lo, 0.0), place(door_lo + door_w, 0.0),
+                              ox, oy, ol, ow)
+    # FACADE IS THE WALL THE ENTRANCE IS ON, not the bounding box's X extent.
+    # Those coincide at rot 0/180 and diverge at 90/270, so reporting the bbox
+    # would hand a caller sizing a complex the wrong number for exactly the
+    # orientations they rotate the block to get.
+    facade, depth = (ol, ow) if ws in ("S", "N") else (ow, ol)
     c.add("insert_interior_door",
           await insert_interior_door(backend, ws, woff, door_w, "in",
                                      label="ВХОД", **modkw))
@@ -2824,6 +2869,7 @@ async def insert_sanitary_block(
     warnings, verified = c.audit(exclude={"draw_module_outline"})
     r = c.result(origin=[ox, oy], outer=[ox, oy, ox + ol, oy + ow],
                  module=[ol, ow], facade=facade, depth=depth,
+                 entrance_wall=ws,
                  stall_count=n, sink_count=n_sink,
                  stall_pitch=cw + tp, aisle_depth=aisle,
                  wall_thickness=t, rotation=rot,
